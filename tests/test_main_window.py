@@ -112,3 +112,65 @@ def test_preview_progress_is_ignored_while_rendering(qtbot, monkeypatch, make_vi
     render_worker.done = True
     w._on_worker_progress(preview_worker, "preview", 4, 4, "미리보기 완료")
     assert w.status_panel.progress.value() == 100
+
+
+def test_settings_action_disabled_while_busy(qtbot):
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    assert w.settings_action.isEnabled()
+    w._set_busy(True)
+    assert not w.settings_action.isEnabled()
+    w._set_busy(False)
+    assert w.settings_action.isEnabled()
+
+
+def test_missing_ffmpeg_hints_and_skips_previews(qtbot, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(main_window, "find_ffmpeg", lambda *a, **k: None)
+    fetched = []
+    monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: fetched.append(1))
+    project, _ = _project_with_clip(make_video, make_clip)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    assert "ffmpeg" in w.status_panel.message.text()
+    w.url_panel.urls_edit.setPlainText(project.videos[0].url)
+    with qtbot.waitSignal(w.analysis_done, timeout=5000):
+        w.start_analysis()
+    assert fetched == []
+    assert "ffmpeg" in w.status_panel.message.text()
+
+
+def test_analyze_reports_skipped_videos(qtbot, monkeypatch, make_video, make_clip):
+    from PySide6.QtWidgets import QMessageBox
+
+    infos = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: infos.append(a[2]))
+    project, _ = _project_with_clip(make_video, make_clip)
+    project.warnings = ["영상을 찾을 수 없어 건너뜀: https://youtu.be/BBBBBBBBBBB"]
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: None)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.url_panel.urls_edit.setPlainText(project.videos[0].url)
+    with qtbot.waitSignal(w.analysis_done, timeout=5000):
+        w.start_analysis()
+    assert infos and "건너뜀" in infos[0]
+
+
+def test_render_refuses_zero_length_clip(qtbot, monkeypatch, tmp_path, make_video, make_clip):
+    from PySide6.QtWidgets import QMessageBox
+
+    from stampcut.core.ffmpeg import FfmpegPaths
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    rendered = []
+    monkeypatch.setattr(main_window.pipeline, "render", lambda *a, **k: rendered.append(1))
+    v = make_video()
+    clip = make_clip(v, 758, caption="원더골", pre=0, post=0)
+    w = MainWindow(Settings(api_key="TEST", output_dir=str(tmp_path / "out")))
+    qtbot.addWidget(w)
+    w.ffpaths = FfmpegPaths(tmp_path / "ffmpeg.exe", tmp_path / "ffprobe.exe")
+    _load_project(w, Project([v.url], "제목", [v], [clip]))
+    w.start_render()
+    assert warned and "0초" in warned[0] and rendered == []

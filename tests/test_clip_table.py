@@ -58,3 +58,14 @@ def test_refresh_row_and_row_of(qtbot, make_video, make_clip):
         m.refresh_row(b)
     assert blocker.args[0].row() == 1
     assert m.row_of(a) == 0 and m.clip_at(1) is b
+
+
+def test_invalid_index_is_ignored(qtbot, make_video, make_clip):
+    from PySide6.QtCore import QModelIndex
+
+    m = ClipTableModel(Settings())
+    assert m.data(QModelIndex()) is None  # 클립이 없을 때도 IndexError가 아니어야 한다
+    assert m.setData(QModelIndex(), 5, Qt.EditRole) is False
+    m.set_clips([make_clip(make_video(), t=758)])
+    assert m.data(QModelIndex()) is None
+    assert m.setData(QModelIndex(), 5, Qt.EditRole) is False

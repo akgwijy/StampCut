@@ -46,3 +46,13 @@ def test_ffmpeg_status_checks_app_dir(qtbot, tmp_path, monkeypatch):
     d = sd.SettingsDialog(Settings(ffmpeg_path=""))
     qtbot.addWidget(d)
     assert "감지됨" in d.ffmpeg_status.text() and str(tmp_path / "bin" / "ffmpeg.exe") in d.ffmpeg_status.text()
+
+
+def test_cache_button_disabled_while_busy(qtbot):
+    d = SettingsDialog(Settings(), busy=True)
+    qtbot.addWidget(d)
+    assert d.cache_btn.isEnabled() is False
+    assert "캐시" in d.cache_btn.toolTip()
+    idle = SettingsDialog(Settings())
+    qtbot.addWidget(idle)
+    assert idle.cache_btn.isEnabled() is True

@@ -35,6 +35,7 @@ from stampcut.gui.url_panel import UrlPanel
 from stampcut.gui.workers import Worker
 
 log = logging.getLogger(__name__)
+FFMPEG_MISSING = "ffmpeg를 찾지 못했습니다 — ⚙ 설정에서 경로를 지정하세요 (설치: winget install Gyan.FFmpeg)"
 
 
 class _ClipBridge(QObject):
@@ -75,7 +76,7 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
-        toolbar.addAction("⚙ 설정", self.open_settings)
+        self.settings_action = toolbar.addAction("⚙ 설정", self.open_settings)
 
         self.url_panel = UrlPanel()
         self.url_panel.analyze_requested.connect(self.start_analysis)
@@ -105,7 +106,9 @@ class MainWindow(QMainWindow):
         self.status_panel.output_dir_changed.connect(self._on_output_dir_changed)
         self.status_panel.set_output_dir(settings_mod.resolve_output_dir(self.settings))
         self.status_panel.update_summary(None, self.settings)
-        if not self.settings.api_key:
+        if self.ffpaths is None:  # ffmpeg가 없으면 아무것도 못 하므로 API 키 안내보다 우선한다
+            self.status_panel.set_idle(FFMPEG_MISSING)
+        elif not self.settings.api_key:
             self.status_panel.set_idle("⚙ 설정에서 YouTube API 키를 먼저 입력하세요")
 
         splitter = QSplitter(Qt.Horizontal)
@@ -127,7 +130,7 @@ class MainWindow(QMainWindow):
         self.downloader = Downloader(settings_mod.cache_dir(), str(self.ffpaths.ffmpeg) if self.ffpaths else None)
 
     def open_settings(self) -> None:
-        dlg = SettingsDialog(self.settings, self)
+        dlg = SettingsDialog(self.settings, self, busy=any(not w.done for w in self._workers))
         if dlg.exec() == SettingsDialog.Accepted:
             self.apply_settings(dlg.result_settings())
 
@@ -173,7 +176,12 @@ class MainWindow(QMainWindow):
             self._info("타임스탬프가 적힌 댓글이 없습니다.")
         else:
             self.table.selectRow(0)
-            self.start_previews(project.clips)
+            if self.ffpaths is None:
+                self.status_panel.set_idle(FFMPEG_MISSING)
+            else:
+                self.start_previews(project.clips)
+        if project.warnings:
+            self._info("\n".join(project.warnings))
         self.analysis_done.emit()
 
     def _on_analyze_failed(self, msg: str) -> None:
@@ -207,6 +215,8 @@ class MainWindow(QMainWindow):
     def _retry_preview(self) -> None:
         clip = self._selected_clip()
         if clip and self.project:
+            if clip.preview_path and clip.preview_path.exists():
+                clip.preview_path.unlink(missing_ok=True)  # 깨진 캐시 파일이면 다시 받도록 지운다
             clip.preview_path = None
             self.start_previews([clip])
 
@@ -248,6 +258,9 @@ class MainWindow(QMainWindow):
             self._warn("ffmpeg를 찾지 못했습니다. 설정에서 경로를 지정하세요.\n(설치: winget install Gyan.FFmpeg)")
             self.open_settings()
             return
+        if any(c.duration(self.settings) < 1 for c in self.project.enabled_clips()):
+            self._warn("길이가 0초인 클립이 있습니다. 앞/뒤 초를 확인하세요.")
+            return
         broken = [c for c in self.project.enabled_clips() if c.status is ClipStatus.ERROR]
         if broken:
             names = ", ".join(f"{c.video.short_name} {c.t // 60}:{c.t % 60:02d}" for c in broken)
@@ -279,7 +292,8 @@ class MainWindow(QMainWindow):
     def _on_rendered(self, path: Path) -> None:
         self._set_busy(False)
         assert self.project is not None
-        self.model.set_clips(self.project.clips)
+        for c in self.project.clips:  # 모델을 갈아끼우면 선택/미리보기가 풀리므로 행만 갱신한다
+            self.model.refresh_row(c)
         self.status_panel.update_summary(self.project, self.settings)
         self.status_panel.set_done(path)
         skipped = [c for c in self.project.clips if c.id in self._render_candidates and not c.enabled]
@@ -319,6 +333,7 @@ class MainWindow(QMainWindow):
         self.status_panel.set_busy(busy)
         self.table.setEnabled(not busy)
         self.preview.setEnabled(not busy)
+        self.settings_action.setEnabled(not busy)
 
     def _warn(self, text: str) -> None:
         QMessageBox.warning(self, "StampCut", text)
@@ -336,5 +351,7 @@ class MainWindow(QMainWindow):
                 w.cancel.set()
             self.pool.waitForDone(5000)
             self._bridge.blockSignals(True)
+            for w in active:  # 시간 안에 안 끝난 워커가 뒤늦게 시그널로 죽은 위젯을 건드리지 않도록
+                w.signals.blockSignals(True)
         self.preview.player.stop()
         event.accept()

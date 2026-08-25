@@ -43,7 +43,7 @@ def ytdlp_version() -> str:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: Settings, parent: QWidget | None = None, busy: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle("설정")
         self.setMinimumWidth(620)
@@ -77,6 +77,9 @@ class SettingsDialog(QDialog):
         self.update_btn.clicked.connect(self._update_ytdlp)
         self.cache_btn = QPushButton("캐시 비우기")
         self.cache_btn.clicked.connect(self._clear_cache)
+        if busy:  # 다운로드/렌더가 쓰고 있는 파일을 지우면 작업이 깨진다
+            self.cache_btn.setEnabled(False)
+            self.cache_btn.setToolTip("작업이 진행 중일 때는 캐시를 비울 수 없습니다")
         self.logs_btn = QPushButton("로그 폴더 열기")
         self.logs_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(settings_mod.log_dir()))))
         self.log_view = QPlainTextEdit()

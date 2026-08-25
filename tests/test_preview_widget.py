@@ -32,6 +32,7 @@ def test_widget_controls_update_clip(qtbot, make_video, make_clip):
     w.set_clip(clip)
     assert (w.pre_spin.value(), w.post_spin.value(), w.zoom_slider.value()) == (3, 15, 100)
     assert w.caption_edit.text() == "원더골"
+    assert not w.pre_spin.keyboardTracking() and not w.post_spin.keyboardTracking()
     with qtbot.waitSignal(w.clip_changed, timeout=1000):
         w.zoom_slider.setValue(200)
     assert clip.zoom == 2.0

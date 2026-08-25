@@ -76,6 +76,8 @@ class ClipTableModel(QAbstractTableModel):
         return f
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
         clip = self.clips[index.row()]
         col = index.column()
         s = self.settings
@@ -111,6 +113,8 @@ class ClipTableModel(QAbstractTableModel):
         return None
 
     def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
+        if not index.isValid():
+            return False
         clip = self.clips[index.row()]
         col = index.column()
         if role == Qt.CheckStateRole and col == COL_ENABLED:

@@ -134,10 +134,12 @@ class PreviewWidget(QWidget):
         self.pre_spin = QSpinBox()
         self.pre_spin.setRange(0, 120)
         self.pre_spin.setSuffix("초")
+        self.pre_spin.setKeyboardTracking(False)  # 타이핑 중간값마다 미리보기를 다시 받지 않도록
         self.pre_spin.valueChanged.connect(self._on_pre)
         self.post_spin = QSpinBox()
         self.post_spin.setRange(0, 120)
         self.post_spin.setSuffix("초")
+        self.post_spin.setKeyboardTracking(False)
         self.post_spin.valueChanged.connect(self._on_post)
         self.caption_edit = QLineEdit()
         self.caption_edit.textChanged.connect(self._on_caption)
