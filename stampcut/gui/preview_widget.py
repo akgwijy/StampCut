@@ -53,10 +53,14 @@ def load_font_family(font_path: Path) -> str:
 
 
 class _DragView(QGraphicsView):
-    def __init__(self, scene: QGraphicsScene, on_drag) -> None:
+    def __init__(self, scene: QGraphicsScene, on_drag, hit_test=None, on_text_drag=None, on_drag_end=None) -> None:
         super().__init__(scene)
         self._on_drag = on_drag
+        self._hit_test = hit_test or (lambda pos: None)
+        self._on_text_drag = on_text_drag or (lambda kind, dy: None)
+        self._on_drag_end = on_drag_end or (lambda: None)
         self._last: QPointF | None = None
+        self._target: str | None = None
         self.setBackgroundBrush(QColor("#202020"))
         self.setRenderHints(self.renderHints() | QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -70,6 +74,7 @@ class _DragView(QGraphicsView):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._last = self.mapToScene(event.position().toPoint())
+            self._target = self._hit_test(self._last)
             self.setCursor(Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, event) -> None:
@@ -77,11 +82,18 @@ class _DragView(QGraphicsView):
             p = self.mapToScene(event.position().toPoint())
             d = p - self._last
             self._last = p
-            self._on_drag(d.x(), d.y())
+            if self._target:
+                self._on_text_drag(self._target, d.y())
+            else:
+                self._on_drag(d.x(), d.y())
 
     def mouseReleaseEvent(self, event) -> None:
+        dragged = self._target
         self._last = None
+        self._target = None
         self.setCursor(Qt.OpenHandCursor)
+        if dragged:
+            self._on_drag_end()
 
 
 class PreviewWidget(QWidget):
@@ -121,7 +133,7 @@ class PreviewWidget(QWidget):
         self.player.positionChanged.connect(self._on_position)
         self.player.setLoops(QMediaPlayer.Loops.Infinite)
 
-        self.view = _DragView(self.scene, self._on_drag)
+        self.view = _DragView(self.scene, self._on_drag, self._hit_text, self._on_text_drag, self._on_text_drag_end)
         self.play_btn = QPushButton("▶ 재생")
         self.play_btn.clicked.connect(self._toggle_play)
         self.pos_label = QLabel("0:00 / 0:00")
@@ -381,6 +393,25 @@ class PreviewWidget(QWidget):
         clip.pan_x, clip.pan_y = pan_after_drag(clip.pan_x, clip.pan_y, dx, dy, g, _S)
         self.relayout()
         self._emit()
+
+    def _hit_text(self, pos: QPointF) -> str | None:
+        if self.title_item.isVisible() and self.title_item.sceneBoundingRect().contains(pos):
+            return "title"
+        if self.caption_item.isVisible() and self.caption_item.sceneBoundingRect().contains(pos):
+            return "caption"
+        return None
+
+    def _on_text_drag(self, kind: str, dy: float) -> None:
+        L = LAYOUT
+        if kind == "title":
+            self.settings.title_y = int(round(min(max(self.settings.title_y + dy, 0), L["canvas_h"])))
+        else:
+            self.settings.caption_y = int(round(min(max(self.settings.caption_y + dy, 0), L["canvas_h"])))
+        self._sync_style_controls()
+        self.relayout()
+
+    def _on_text_drag_end(self) -> None:
+        self.style_changed.emit()
 
     def _on_zoom(self, value: int) -> None:
         snapped = int(round(value / 5)) * 5

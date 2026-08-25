@@ -1,6 +1,10 @@
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QGraphicsScene
+
 from stampcut.core.models import Settings
 from stampcut.core.renderer import compute_square_geometry
-from stampcut.gui.preview_widget import PreviewWidget, pan_after_drag, video_item_placement
+from stampcut.gui.preview_widget import PreviewWidget, _DragView, pan_after_drag, video_item_placement
 
 
 def test_pan_after_drag_zoom_in_moves_video_with_cursor():
@@ -117,3 +121,56 @@ def test_set_settings_syncs_style_controls(qtbot):
     assert (w.title_y_spin.value(), w.caption_y_spin.value()) == (111, 1222)
     assert w.title_item.brush().color().name() == "#123456"
     assert w.caption_item.brush().color().name() == "#654321"
+
+
+def _mouse(type_, pos):
+    p = QPointF(pos)
+    return QMouseEvent(type_, p, p, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+
+
+def test_dragview_routes_text_drag_vs_video_pan(qtbot):
+    scene = QGraphicsScene(0, 0, 100, 100)
+    calls = []
+    target = {"v": "title"}
+    view = _DragView(
+        scene,
+        lambda dx, dy: calls.append(("pan", dx, dy)),
+        hit_test=lambda pos: target["v"],
+        on_text_drag=lambda kind, dy: calls.append((kind, dy)),
+        on_drag_end=lambda: calls.append(("end",)),
+    )
+    qtbot.addWidget(view)
+    view.mousePressEvent(_mouse(QEvent.MouseButtonPress, QPoint(10, 10)))
+    view.mouseMoveEvent(_mouse(QEvent.MouseMove, QPoint(10, 25)))
+    view.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, QPoint(10, 25)))
+    assert ("title", 15.0) in calls and ("end",) in calls
+    assert not [c for c in calls if c[0] == "pan"]
+    calls.clear()
+    target["v"] = None  # 텍스트 밖 → 영상 팬
+    view.mousePressEvent(_mouse(QEvent.MouseButtonPress, QPoint(10, 80)))
+    view.mouseMoveEvent(_mouse(QEvent.MouseMove, QPoint(15, 90)))
+    view.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, QPoint(15, 90)))
+    assert ("pan", 5.0, 10.0) in calls and ("end",) not in calls
+
+
+def test_hit_text_finds_title_and_caption(qtbot, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.set_title("문성FC 하이라이트")
+    w.set_clip(make_clip(make_video(), t=758, caption="원더골"))
+    assert w._hit_text(w.title_item.sceneBoundingRect().center()) == "title"
+    assert w._hit_text(w.caption_item.sceneBoundingRect().center()) == "caption"
+    assert w._hit_text(QPointF(540, 900)) is None  # 정방형 한가운데 = 영상 영역
+
+
+def test_text_drag_updates_settings_and_emits_on_release(qtbot):
+    s = Settings()
+    w = PreviewWidget(s, "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.set_title("문성FC 하이라이트")
+    w._on_text_drag("title", 50.0)
+    assert s.title_y == 260 and w.title_y_spin.value() == 260  # 스핀박스 동기화
+    with qtbot.waitSignal(w.style_changed, timeout=1000):
+        w._on_text_drag_end()
+    w._on_text_drag("caption", -100000.0)
+    assert s.caption_y == 0  # 클램프
