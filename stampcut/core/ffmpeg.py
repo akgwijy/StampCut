@@ -4,6 +4,7 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import queue
 import re
 import shutil
 import subprocess
@@ -72,12 +73,16 @@ def parse_probe_json(text: str) -> ProbeInfo:
         raise FfmpegError("비디오 스트림이 없습니다")
     w, h = int(video["width"]), int(video["height"])
     rotation = 0
+    side_data_rotation = None
     for sd in video.get("side_data_list", []):
         if "rotation" in sd:
-            rotation = int(float(sd["rotation"]))
-    tags_rot = video.get("tags", {}).get("rotate")
-    if tags_rot:
-        rotation = int(float(tags_rot))
+            side_data_rotation = int(float(sd["rotation"]))
+    if side_data_rotation is not None:
+        rotation = side_data_rotation
+    else:
+        tags_rot = video.get("tags", {}).get("rotate")
+        if tags_rot:
+            rotation = int(float(tags_rot))
     if abs(rotation) % 180 == 90:
         w, h = h, w
     duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0)
@@ -106,7 +111,9 @@ def run(
 ) -> None:
     full = [str(c) for c in cmd] + ["-progress", "pipe:1", "-nostats", "-y"]
     log.info("run: %s", " ".join(full))
-    proc = subprocess.Popen(
+    tail: collections.deque[str] = collections.deque(maxlen=30)
+
+    with subprocess.Popen(
         full,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -114,27 +121,41 @@ def run(
         encoding="utf-8",
         errors="replace",
         creationflags=_NO_WINDOW,
-    )
-    tail: collections.deque[str] = collections.deque(maxlen=60)
+    ) as proc:
+        lines: queue.Queue[str | None] = queue.Queue()
 
-    def _drain() -> None:
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            tail.append(line.rstrip())
+        def _read_stdout() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                lines.put(line)
+            lines.put(None)
 
-    t = threading.Thread(target=_drain, daemon=True)
-    t.start()
-    try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            if cancel is not None and cancel.is_set():
-                proc.kill()
-                raise Cancelled()
-            secs = parse_progress_line(line)
-            if secs is not None and on_progress and total_seconds:
-                on_progress(min(1.0, secs / total_seconds))
-    finally:
-        proc.wait()
-        t.join(timeout=5)
+        def _drain() -> None:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                tail.append(line.rstrip())
+
+        reader = threading.Thread(target=_read_stdout, daemon=True)
+        drainer = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+        drainer.start()
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    proc.kill()
+                    raise Cancelled()
+                try:
+                    line = lines.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                secs = parse_progress_line(line)
+                if secs is not None and on_progress and total_seconds:
+                    on_progress(min(1.0, secs / total_seconds))
+        finally:
+            proc.wait()
+            reader.join(timeout=5)
+            drainer.join(timeout=5)
     if proc.returncode != 0:
-        raise FfmpegError("\n".join(list(tail)[-30:]))
+        raise FfmpegError("\n".join(tail))

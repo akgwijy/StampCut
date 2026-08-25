@@ -1,6 +1,7 @@
 import json
 import sys
 import threading
+import time
 
 import pytest
 
@@ -39,10 +40,12 @@ def test_parse_progress_line():
     assert ff.parse_progress_line("frame=10") is None
 
 
-def _probe_json(rotation=None, audio=True):
+def _probe_json(rotation=None, audio=True, tags=None):
     v = {"codec_type": "video", "width": 1920, "height": 1080}
     if rotation is not None:
         v["side_data_list"] = [{"rotation": rotation}]
+    if tags is not None:
+        v["tags"] = tags
     streams = [v] + ([{"codec_type": "audio"}] if audio else [])
     return json.dumps({"streams": streams, "format": {"duration": "25.04"}})
 
@@ -75,3 +78,41 @@ def test_run_cancel():
     cancel.set()
     with pytest.raises(ff.Cancelled):
         ff.run([sys.executable, "-c", "print('out_time_ms=1')"], cancel=cancel)
+
+
+def test_run_cancel_while_stalled():
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    t0 = time.monotonic()
+    with pytest.raises(ff.Cancelled):
+        ff.run([sys.executable, "-c", "import time; time.sleep(10)"], cancel=cancel)
+    assert time.monotonic() - t0 < 5
+
+
+def test_run_error_tail_keeps_last_30_lines():
+    code = (
+        "import sys\n"
+        "for i in range(40):\n"
+        "    sys.stderr.write('line %d\\n' % i)\n"
+        "sys.exit(1)\n"
+    )
+    with pytest.raises(ff.FfmpegError) as ei:
+        ff.run([sys.executable, "-c", code])
+    msg = str(ei.value)
+    assert "line 39" in msg
+    assert "line 5" not in msg
+
+
+def test_parse_probe_json_prefers_side_data_rotation_over_tags():
+    info = ff.parse_probe_json(_probe_json(rotation=90, tags={"rotate": "0"}))
+    assert (info.width, info.height) == (1080, 1920)
+
+
+def test_parse_probe_json_falls_back_to_tags_rotate():
+    info = ff.parse_probe_json(_probe_json(tags={"rotate": "90"}))
+    assert (info.width, info.height) == (1080, 1920)
+
+
+def test_parse_probe_json_tags_rotate_180():
+    info = ff.parse_probe_json(_probe_json(tags={"rotate": "180"}))
+    assert (info.width, info.height) == (1920, 1080)
