@@ -76,3 +76,44 @@ def test_shutdown_is_idempotent_and_detaches(qtbot, make_video, make_clip):
     w.shutdown()
     assert w.player.videoOutput() is None
     w.close()  # closeEvent → shutdown again, must not raise
+
+
+def test_style_controls_work_without_clip(qtbot):
+    s = Settings()
+    w = PreviewWidget(s, "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.set_title("문성FC 하이라이트")
+    assert w.title_y_spin.isEnabled() and w.caption_y_spin.isEnabled()  # 클립 없어도 활성화
+    with qtbot.waitSignal(w.style_changed, timeout=1000):
+        w.title_y_spin.setValue(300)
+    assert s.title_y == 300
+    r = w.title_item.boundingRect()
+    assert abs(w.title_item.pos().y() - (300 - r.height() / 2)) < 1.0  # 세로 중심 기준
+    with qtbot.waitSignal(w.style_changed, timeout=1000):
+        w._set_title_color("#ff0000")
+    assert s.title_color == "#ff0000"
+    assert w.title_item.brush().color().name() == "#ff0000"
+
+
+def test_caption_style_moves_caption_and_time(qtbot, make_video, make_clip):
+    s = Settings()
+    w = PreviewWidget(s, "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.set_clip(make_clip(make_video(), t=758, caption="원더골"))
+    with qtbot.waitSignal(w.style_changed, timeout=1000):
+        w.caption_y_spin.setValue(1400)
+    assert s.caption_y == 1400
+    assert w.caption_item.pos().y() == 1400.0          # 상단 기준
+    assert w.time_item.pos().y() == 1358.0             # 자막 위 42px
+    with qtbot.waitSignal(w.style_changed, timeout=1000):
+        w._set_caption_color("#00ff00")
+    assert w.caption_item.brush().color().name() == "#00ff00"
+
+
+def test_set_settings_syncs_style_controls(qtbot):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.set_settings(Settings(title_y=111, caption_y=1222, title_color="#123456", caption_color="#654321"))
+    assert (w.title_y_spin.value(), w.caption_y_spin.value()) == (111, 1222)
+    assert w.title_item.brush().color().name() == "#123456"
+    assert w.caption_item.brush().color().name() == "#654321"

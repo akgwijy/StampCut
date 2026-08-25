@@ -8,6 +8,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QPainter, QPen
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
+    QColorDialog,
     QFormLayout,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from stampcut.core.models import Clip, Settings
-from stampcut.core.renderer import LAYOUT, ZOOM_MAX, ZOOM_MIN, SquareGeometry, compute_square_geometry
+from stampcut.core.renderer import LAYOUT, TIME_GAP, ZOOM_MAX, ZOOM_MIN, SquareGeometry, compute_square_geometry
 from stampcut.core.textwrap_kr import wrap
 from stampcut.core.timestamps import format_time
 
@@ -85,6 +86,7 @@ class _DragView(QGraphicsView):
 
 class PreviewWidget(QWidget):
     clip_changed = Signal(object)
+    style_changed = Signal()  # 타이틀·자막 위치/색 변경 (settings에 직접 반영됨; 메인 창이 저장)
 
     def __init__(self, settings: Settings, font_family: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -108,9 +110,9 @@ class PreviewWidget(QWidget):
         self.video_item = QGraphicsVideoItem(self.square)
         self.video_item.nativeSizeChanged.connect(self._on_native_size)
 
-        self.title_item = self._text_item(L["title_font"], "white")
+        self.title_item = self._text_item(L["title_font"], self.settings.title_color)
         self.time_item = self._text_item(L["time_font"], L["time_color"])
-        self.caption_item = self._text_item(L["caption_font"], "white", border=L["caption_border"])
+        self.caption_item = self._text_item(L["caption_font"], self.settings.caption_color, border=L["caption_border"])
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -144,6 +146,10 @@ class PreviewWidget(QWidget):
         self.post_spin.valueChanged.connect(self._on_post)
         self.caption_edit = QLineEdit()
         self.caption_edit.textChanged.connect(self._on_caption)
+        self.title_color_btn = self._color_button(self.settings.title_color, self._on_title_color)
+        self.title_y_spin = self._y_spin(self.settings.title_y, self._on_title_y)
+        self.caption_color_btn = self._color_button(self.settings.caption_color, self._on_caption_color)
+        self.caption_y_spin = self._y_spin(self.settings.caption_y, self._on_caption_y)
         self.reset_btn = QPushButton("기본값으로")
         self.reset_btn.clicked.connect(self._reset)
 
@@ -162,7 +168,17 @@ class PreviewWidget(QWidget):
         srow.addWidget(QLabel("뒤"))
         srow.addWidget(self.post_spin)
         controls.addRow("클립", srow)
-        controls.addRow("자막", self.caption_edit)
+        trow = QHBoxLayout()
+        trow.addWidget(QLabel("Y"))
+        trow.addWidget(self.title_y_spin)
+        trow.addWidget(self.title_color_btn)
+        trow.addStretch(1)
+        controls.addRow("타이틀", trow)
+        crow = QHBoxLayout()
+        crow.addWidget(self.caption_edit, 1)
+        crow.addWidget(self.caption_y_spin)
+        crow.addWidget(self.caption_color_btn)
+        controls.addRow("자막", crow)
         controls.addRow(self.reset_btn)
 
         layout = QHBoxLayout(self)
@@ -184,6 +200,26 @@ class PreviewWidget(QWidget):
         item.setPen(QPen(QColor("black"), border) if border else QPen(Qt.NoPen))
         self.scene.addItem(item)
         return item
+
+    def _y_spin(self, value: int, handler) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(0, LAYOUT["canvas_h"])
+        spin.setKeyboardTracking(False)
+        spin.setValue(value)
+        spin.valueChanged.connect(handler)
+        return spin
+
+    def _color_button(self, color: str, handler) -> QPushButton:
+        btn = QPushButton()
+        btn.setFixedSize(28, 22)
+        btn.setToolTip("색상 변경")
+        self._paint_color_button(btn, color)
+        btn.clicked.connect(handler)
+        return btn
+
+    @staticmethod
+    def _paint_color_button(btn: QPushButton, color: str) -> None:
+        btn.setStyleSheet(f"background-color: {color}; border: 1px solid #888888;")
 
     def _set_controls_enabled(self, on: bool) -> None:
         for w in (self.play_btn, self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit, self.reset_btn):
@@ -212,7 +248,18 @@ class PreviewWidget(QWidget):
     def set_settings(self, settings: Settings) -> None:
         self.settings = settings
         self._apply_background()
+        self._sync_style_controls()
         self.relayout()
+
+    def _sync_style_controls(self) -> None:
+        for w in (self.title_y_spin, self.caption_y_spin):
+            w.blockSignals(True)
+        self.title_y_spin.setValue(self.settings.title_y)
+        self.caption_y_spin.setValue(self.settings.caption_y)
+        for w in (self.title_y_spin, self.caption_y_spin):
+            w.blockSignals(False)
+        self._paint_color_button(self.title_color_btn, self.settings.title_color)
+        self._paint_color_button(self.caption_color_btn, self.settings.caption_color)
 
     def set_title(self, title: str) -> None:
         self.title = title
@@ -255,19 +302,24 @@ class PreviewWidget(QWidget):
         x, y, vw, vh = video_item_placement(g, _S)
         self.video_item.setSize(QSizeF(vw, vh))
         self.video_item.setPos(x, y)
-        self._place_text(self.title_item, wrap(self.title, L["title_font"], L["max_text_width"], L["max_lines"]), None, L["title_band_h"])
-        show_time = bool(clip) and self.settings.show_time_in_caption
+        s = self.settings
+        title_y = min(max(s.title_y, 0), L["canvas_h"])
+        caption_y = min(max(s.caption_y, 0), L["canvas_h"])
+        self.title_item.setBrush(QBrush(QColor(s.title_color)))
+        self.caption_item.setBrush(QBrush(QColor(s.caption_color)))
+        self._place_text(self.title_item, wrap(self.title, L["title_font"], L["max_text_width"], L["max_lines"]), center=title_y)
+        show_time = bool(clip) and s.show_time_in_caption
         self.time_item.setVisible(show_time)
         if clip:
-            self._place_text(self.time_item, format_time(clip.t), L["time_y"], None)
-            self._place_text(self.caption_item, wrap(clip.caption, L["caption_font"], L["max_text_width"], L["max_lines"]), L["caption_y"], None)
+            self._place_text(self.time_item, format_time(clip.t), top=caption_y - TIME_GAP)
+            self._place_text(self.caption_item, wrap(clip.caption, L["caption_font"], L["max_text_width"], L["max_lines"]), top=caption_y)
         self.caption_item.setVisible(bool(clip))
 
-    def _place_text(self, item: QGraphicsSimpleTextItem, text: str, y: int | None, band_h: int | None) -> None:
+    def _place_text(self, item: QGraphicsSimpleTextItem, text: str, top: float | None = None, center: float | None = None) -> None:
         item.setText(text)
         r = item.boundingRect()
-        top = (band_h - r.height()) / 2 if band_h is not None else float(y or 0)
-        item.setPos((LAYOUT["canvas_w"] - r.width()) / 2, top)
+        y = center - r.height() / 2 if center is not None else float(top or 0)
+        item.setPos((LAYOUT["canvas_w"] - r.width()) / 2, y)
 
     def sync_from_clip(self) -> None:
         """클립 값을 컨트롤과 배치에 반영한다 (clip_changed를 내지 않음)."""
@@ -370,3 +422,39 @@ class PreviewWidget(QWidget):
         clip.zoom, clip.pan_x, clip.pan_y = 1.0, 0.5, 0.5
         self.sync_from_clip()
         self._emit()
+
+    def _on_title_y(self, value: int) -> None:
+        self.settings.title_y = value
+        self.relayout()
+        self.style_changed.emit()
+
+    def _on_caption_y(self, value: int) -> None:
+        self.settings.caption_y = value
+        self.relayout()
+        self.style_changed.emit()
+
+    def _pick_color(self, current: str) -> str | None:
+        c = QColorDialog.getColor(QColor(current), self, "색상 선택")
+        return c.name() if c.isValid() else None
+
+    def _on_title_color(self) -> None:
+        c = self._pick_color(self.settings.title_color)
+        if c is not None:
+            self._set_title_color(c)
+
+    def _on_caption_color(self) -> None:
+        c = self._pick_color(self.settings.caption_color)
+        if c is not None:
+            self._set_caption_color(c)
+
+    def _set_title_color(self, color: str) -> None:
+        self.settings.title_color = color
+        self._paint_color_button(self.title_color_btn, color)
+        self.relayout()
+        self.style_changed.emit()
+
+    def _set_caption_color(self, color: str) -> None:
+        self.settings.caption_color = color
+        self._paint_color_button(self.caption_color_btn, color)
+        self.relayout()
+        self.style_changed.emit()
