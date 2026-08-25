@@ -26,9 +26,12 @@ class DownloadCancelled(Exception):
 
 def _remove_partials(out: Path) -> None:
     """out 자체와 yt-dlp가 남긴 .part / .fNNN 중간 파일을 지운다."""
-    for p in out.parent.glob(out.stem + "*"):
+    for p in out.parent.glob(out.stem + ".*"):
         if p.is_file():
-            p.unlink(missing_ok=True)
+            try:
+                p.unlink()
+            except OSError as e:  # 잠긴 파일 등 — 정리 실패가 취소/실패 예외를 가리면 안 된다
+                log.warning("partial cleanup failed for %s: %s", p, e)
 
 
 def preview_range(clip: Clip, s: Settings) -> tuple[int, int]:

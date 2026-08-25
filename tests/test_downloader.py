@@ -52,7 +52,7 @@ class PartialThenCancelYdl(FakeYdl):
 
 class SilentYdl(FakeYdl):
     def download(self, urls):
-        pass
+        Path(self.opts["outtmpl"] + ".part").write_bytes(b"partial")
 
 
 @pytest.fixture(autouse=True)
@@ -110,13 +110,17 @@ def test_preview_covers_false_when_widened(tmp_path, make_video, make_clip):
 
 def test_cancel_raises_and_removes_partial(tmp_path, make_video, make_clip):
     clip = make_clip(make_video(duration=1449), t=758)
+    video_dir = tmp_path / "POZWcyKFvjY"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    # Create a sibling file that should NOT be deleted
+    (video_dir / "preview_728_8180.mp4").write_bytes(b"keep")
     cancel = threading.Event()
     cancel.set()
     with pytest.raises(DownloadCancelled):
         Downloader(tmp_path, None, PartialThenCancelYdl).download_preview(clip, Settings(), cancel=cancel)
-    video_dir = tmp_path / "POZWcyKFvjY"
     assert not (video_dir / "preview_728_818.mp4").exists()
-    assert list(video_dir.iterdir()) == []
+    # Exactly one file should remain: the sibling file we created
+    assert [p.name for p in video_dir.iterdir()] == ["preview_728_8180.mp4"]
 
 
 def test_download_error_maps_to_download_failed(tmp_path, make_video, make_clip):
@@ -131,3 +135,7 @@ def test_no_output_raises_download_failed(tmp_path, make_video, make_clip):
     with pytest.raises(DownloadFailed) as ei:
         Downloader(tmp_path, None, SilentYdl).download_final(clip, Settings())
     assert "결과 파일" in str(ei.value)
+    # Verify the .part file was cleaned up
+    video_dir = tmp_path / "POZWcyKFvjY"
+    part_file = video_dir / "final_755_773.mp4.part"
+    assert not part_file.exists()
