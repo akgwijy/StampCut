@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
         w = Worker(pipeline.fetch_previews, self.project, self.settings, self.downloader, self._bridge.updated.emit, clips=clips)
         w.signals.finished.connect(self._on_previews_finished)
         w.signals.failed.connect(self._on_previews_failed)
-        self._start(w, drive_status=not self._rendering())
+        self._start(w)
 
     def _on_previews_finished(self, _result) -> None:
         if self._rendering() or self.status_panel.has_result():
@@ -302,12 +302,17 @@ class MainWindow(QMainWindow):
     def _rendering(self) -> bool:
         return self._render_worker is not None and not self._render_worker.done
 
-    def _start(self, w: Worker, drive_status: bool = True) -> None:
+    def _start(self, w: Worker) -> None:
         self._workers = [x for x in self._workers if not x.done]
-        if drive_status:
-            w.signals.progress.connect(self.status_panel.set_progress)
+        w.signals.progress.connect(lambda stage, done, total, msg, w=w: self._on_worker_progress(w, stage, done, total, msg))
         self._workers.append(w)
         self.pool.start(w)
+
+    def _on_worker_progress(self, worker: Worker, stage: str, done: int, total: int, message: str) -> None:
+        """렌더 중에는 렌더 워커의 진행률만 상태줄에 반영한다 (미리보기 틱이 덮어쓰지 않도록)."""
+        if self._rendering() and worker is not self._render_worker:
+            return
+        self.status_panel.set_progress(stage, done, total, message)
 
     def _set_busy(self, busy: bool) -> None:
         self.url_panel.set_busy(busy)

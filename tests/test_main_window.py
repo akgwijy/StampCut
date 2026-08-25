@@ -94,3 +94,21 @@ def test_render_happy_path_and_preview_finish_does_not_clobber(qtbot, monkeypatc
     # a preview worker finishing now must not reset the finished render's status
     w._on_previews_finished(None)
     assert w.status_panel.progress.value() == 100 and not w.status_panel.open_folder_btn.isHidden()
+
+
+def test_preview_progress_is_ignored_while_rendering(qtbot, monkeypatch, make_video, make_clip):
+    from stampcut.gui.workers import Worker
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    render_worker = Worker(lambda progress, cancel: None)  # 아직 실행 전 → done=False → 렌더 중으로 간주
+    preview_worker = Worker(lambda progress, cancel: None)
+    w._render_worker = render_worker
+    w.status_panel.set_progress("download", 1, 4, "받는 중")
+    assert w.status_panel.progress.value() == 10
+    w._on_worker_progress(preview_worker, "preview", 4, 4, "미리보기 완료")
+    assert w.status_panel.progress.value() == 10 and w.status_panel.message.text() == "받는 중"
+    w._on_worker_progress(render_worker, "render", 50, 100, "렌더링 중")
+    assert w.status_panel.progress.value() == 65
+    render_worker.done = True
+    w._on_worker_progress(preview_worker, "preview", 4, 4, "미리보기 완료")
+    assert w.status_panel.progress.value() == 100
