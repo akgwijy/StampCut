@@ -30,6 +30,7 @@ LAYOUT: dict = {
 }
 ZOOM_MIN = 0.5
 ZOOM_MAX = 3.0
+TIME_GAP = 42  # 시간 표시는 자막 상단에서 이만큼 위
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,8 @@ def build_clip_command(
     L = LAYOUT
     S, W, H, fps = L["square"], L["canvas_w"], L["canvas_h"], L["fps"]
     g = compute_square_geometry(probe.width, probe.height, clip.zoom, clip.pan_x, clip.pan_y, S)
+    title_y = int(_clamp(settings.title_y, 0, L["canvas_h"]))
+    caption_y = int(_clamp(settings.caption_y, 0, L["canvas_h"]))
     dur = clip.duration(settings)
     bg = ff_color(settings.background_color)
     stem = workdir / f"clip_{index:03d}"
@@ -143,13 +146,13 @@ def build_clip_command(
     ]
     last = "c0"
     if title.strip():
-        filters.append(_drawtext(last, "c1", title_txt, font_path, L["title_font"], "white", "(w-text_w)/2", f"({L['title_band_h']}-text_h)/2", line_spacing=L["line_spacing"]))
+        filters.append(_drawtext(last, "c1", title_txt, font_path, L["title_font"], ff_color(settings.title_color), "(w-text_w)/2", f"{title_y}-text_h/2", line_spacing=L["line_spacing"]))
         last = "c1"
     if settings.show_time_in_caption:
-        filters.append(_drawtext(last, "c2", time_txt, font_path, L["time_font"], ff_color(L["time_color"]), "(w-text_w)/2", str(L["time_y"])))
+        filters.append(_drawtext(last, "c2", time_txt, font_path, L["time_font"], ff_color(L["time_color"]), "(w-text_w)/2", str(caption_y - TIME_GAP)))
         last = "c2"
     if clip.caption.strip():
-        filters.append(_drawtext(last, "c3", caption_txt, font_path, L["caption_font"], "white", "(w-text_w)/2", str(L["caption_y"]), border=L["caption_border"], line_spacing=L["line_spacing"]))
+        filters.append(_drawtext(last, "c3", caption_txt, font_path, L["caption_font"], ff_color(settings.caption_color), "(w-text_w)/2", str(caption_y), border=L["caption_border"], line_spacing=L["line_spacing"]))
         last = "c3"
     filters.append(f"[{last}]null[v]")
     audio_src = "0:a" if probe.has_audio else "1:a"

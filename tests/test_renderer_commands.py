@@ -96,3 +96,17 @@ def test_concat_list_and_command(tmp_path):
     cmd = build_concat_command(paths(tmp_path), lst, tmp_path / "out.mp4")
     assert cmd[1:7] == ["-hide_banner", "-f", "concat", "-safe", "0", "-i"] and cmd[-1].endswith("out.mp4")
     assert "copy" in cmd
+
+
+def test_custom_text_style_from_settings(tmp_path, make_video, make_clip):
+    s = Settings(title_y=300, title_color="#ff8800", caption_y=1400, caption_color="#00ff00")
+    fc = filter_complex(build(tmp_path, make_clip(make_video(), t=758), s)[0])
+    assert "y=300-text_h/2" in fc and "fontcolor=0xff8800" in fc  # 타이틀: 세로 중심 기준
+    assert "y=1400" in fc and "fontcolor=0x00ff00" in fc          # 자막: 상단 기준
+    assert "y=1358" in fc                                          # 시간: 자막 위 42px
+
+
+def test_style_y_clamped_to_canvas(tmp_path, make_video, make_clip):
+    s = Settings(title_y=-50, caption_y=99999)
+    fc = filter_complex(build(tmp_path, make_clip(make_video(), t=758), s)[0])
+    assert "y=0-text_h/2" in fc and "y=1920" in fc and "y=1878" in fc
