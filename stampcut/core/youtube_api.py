@@ -36,8 +36,8 @@ class CommentsDisabled(YouTubeApiError):
 
 
 class VideoNotFound(YouTubeApiError):
-    def __init__(self, video_id: str):
-        super().__init__(f"영상을 찾을 수 없습니다: {video_id}")
+    def __init__(self, video_id: str, message: str | None = None):
+        super().__init__(message if message is not None else f"영상을 찾을 수 없습니다: {video_id}")
         self.video_id = video_id
 
 
@@ -82,7 +82,10 @@ class YouTubeClient:
 
     def _get(self, resource: str, **params) -> dict:
         params["key"] = self.api_key
-        r = self.session.get(f"{self.base_url}/{resource}", params=params, timeout=30)
+        try:
+            r = self.session.get(f"{self.base_url}/{resource}", params=params, timeout=30)
+        except requests.RequestException as e:
+            raise YouTubeApiError(f"네트워크 오류: {e}") from e
         if r.status_code != 200:
             self._raise(r)
         return r.json()
@@ -95,14 +98,17 @@ class YouTubeClient:
             err = {}
         reasons = {e.get("reason") for e in err.get("errors", [])}
         msg = err.get("message", r.text[:200])
-        if r.status_code == 400 and ("keyInvalid" in reasons or "API key not valid" in msg):
-            raise ApiKeyError(msg)
+        if r.status_code in (400, 403):
+            if "keyInvalid" in reasons or "accessNotConfigured" in reasons or "API key not valid" in msg:
+                raise ApiKeyError(msg)
         if r.status_code == 403:
             if "quotaExceeded" in reasons:
                 raise QuotaError(msg)
             if "commentsDisabled" in reasons:
                 raise CommentsDisabled(msg)
-            raise ApiKeyError(msg)
+            raise YouTubeApiError(f"HTTP 403: {msg}")
+        if r.status_code == 404:
+            raise VideoNotFound("", msg)
         raise YouTubeApiError(f"HTTP {r.status_code}: {msg}")
 
     def fetch_video_infos(self, urls: list[str]) -> list[VideoInfo]:
@@ -114,13 +120,13 @@ class YouTubeClient:
             ids.append(vid)
         items: dict[str, dict] = {}
         for i in range(0, len(ids), 50):
-            data = self._get("videos", part="snippet,contentDetails,statistics", id=",".join(ids[i : i + 50]), maxResults=50)
+            data = self._get("videos", part="snippet,contentDetails,statistics", id=",".join(ids[i : i + 50]))
             for it in data.get("items", []):
                 items[it["id"]] = it
         infos: list[VideoInfo] = []
         for idx, (u, vid) in enumerate(zip(urls, ids)):
             it = items.get(vid)
-            if not it:
+            if not it or "snippet" not in it or "contentDetails" not in it:
                 raise VideoNotFound(vid)
             sn = it["snippet"]
             infos.append(
@@ -146,7 +152,7 @@ class YouTubeClient:
             if token:
                 params["pageToken"] = token
             data = self._get("comments", **params)
-            out.extend(_raw(it, True) for it in data.get("items", []))
+            out.extend(_raw(it, True) for it in data.get("items", []) if "snippet" in it)
             token = data.get("nextPageToken")
             if not token:
                 return out
@@ -161,15 +167,17 @@ class YouTubeClient:
             try:
                 data = self._get("commentThreads", **params)
             except CommentsDisabled:
-                return []
+                return out
             for th in data.get("items", []):
-                top = th["snippet"]["topLevelComment"]
+                top = th.get("snippet", {}).get("topLevelComment", {})
+                if "snippet" not in top:
+                    continue
                 out.append(_raw(top, False))
                 replies = th.get("replies", {}).get("comments", [])
                 if th["snippet"].get("totalReplyCount", 0) > len(replies):
                     out.extend(self._fetch_replies(top["id"]))
                 else:
-                    out.extend(_raw(r, True) for r in replies)
+                    out.extend(_raw(r, True) for r in replies if "snippet" in r)
             token = data.get("nextPageToken")
             if not token:
                 return out

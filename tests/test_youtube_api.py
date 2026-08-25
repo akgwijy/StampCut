@@ -2,6 +2,7 @@ import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
 import responses
 
 from stampcut.core.youtube_api import (
@@ -9,6 +10,7 @@ from stampcut.core.youtube_api import (
     ApiKeyError,
     QuotaError,
     VideoNotFound,
+    YouTubeApiError,
     YouTubeClient,
     parse_iso_duration,
     parse_video_id,
@@ -131,3 +133,86 @@ def test_error_mapping():
         YouTubeClient("KEY").fetch_video_infos([VID_A])
     responses.get(f"{BASE_URL}/commentThreads", **_err(403, "commentsDisabled"))
     assert YouTubeClient("KEY").fetch_all_comments(VID_A) == []
+
+
+@responses.activate
+def test_error_403_forbidden_is_generic_not_api_key_error():
+    responses.get(f"{BASE_URL}/videos", **_err(403, "forbidden"))
+    with pytest.raises(YouTubeApiError) as ei:
+        YouTubeClient("KEY").fetch_video_infos([VID_A])
+    assert not isinstance(ei.value, ApiKeyError)
+
+
+@responses.activate
+def test_error_403_access_not_configured_is_api_key_error():
+    responses.get(f"{BASE_URL}/videos", **_err(403, "accessNotConfigured"))
+    with pytest.raises(ApiKeyError):
+        YouTubeClient("KEY").fetch_video_infos([VID_A])
+
+
+@responses.activate
+def test_error_404_raises_video_not_found():
+    responses.get(
+        f"{BASE_URL}/videos",
+        status=404,
+        json={"error": {"code": 404, "message": "nope", "errors": [{"reason": "notFound"}]}},
+    )
+    with pytest.raises(VideoNotFound):
+        YouTubeClient("KEY").fetch_video_infos([VID_A])
+
+
+@responses.activate
+def test_network_error_wrapped_as_youtube_api_error():
+    responses.get(f"{BASE_URL}/videos", body=requests.ConnectionError("down"))
+    with pytest.raises(YouTubeApiError):
+        YouTubeClient("KEY").fetch_video_infos([VID_A])
+
+
+@responses.activate
+def test_fetch_video_infos_missing_content_details_raises_video_not_found():
+    item = video_item(VID_A)
+    del item["contentDetails"]
+    responses.get(f"{BASE_URL}/videos", json={"items": [item]})
+    with pytest.raises(VideoNotFound) as ei:
+        YouTubeClient("KEY").fetch_video_infos([VID_A])
+    assert ei.value.video_id == VID_A
+
+
+def _thread_missing_top_level_snippet(cid):
+    return {
+        "id": cid,
+        "snippet": {"topLevelComment": {"id": cid}, "totalReplyCount": 0},
+        "replies": {"comments": []},
+    }
+
+
+@responses.activate
+def test_fetch_all_comments_skips_thread_with_malformed_top_level_comment():
+    body = {"items": [_thread_missing_top_level_snippet("bad1"), thread("c1", "정상 댓글")]}
+    responses.get(f"{BASE_URL}/commentThreads", json=body)
+    out = YouTubeClient("KEY").fetch_all_comments(VID_A)
+    assert [c.id for c in out] == ["c1"]
+
+
+@responses.activate
+def test_fetch_all_comments_skips_malformed_reply():
+    th = thread("c1", "댓글", replies=[], total=2)
+    responses.get(f"{BASE_URL}/commentThreads", json={"items": [th]})
+    responses.get(f"{BASE_URL}/comments", json={"items": [{"id": "bad_reply"}, reply("r1", "정상 답글")]})
+    out = YouTubeClient("KEY").fetch_all_comments(VID_A)
+    assert [c.id for c in out] == ["c1", "r1"]
+
+
+@responses.activate
+def test_fetch_all_comments_disabled_mid_pagination_returns_partial():
+    def threads_cb(request):
+        q = parse_qs(urlparse(request.url).query)
+        if "pageToken" not in q:
+            body = {"items": [thread("c1", "첫 댓글")], "nextPageToken": "P2"}
+            return 200, {}, json.dumps(body)
+        err = {"error": {"code": 403, "message": "commentsDisabled", "errors": [{"reason": "commentsDisabled"}]}}
+        return 403, {}, json.dumps(err)
+
+    responses.add_callback(responses.GET, f"{BASE_URL}/commentThreads", callback=threads_cb, content_type="application/json")
+    out = YouTubeClient("KEY").fetch_all_comments(VID_A)
+    assert [c.id for c in out] == ["c1"]
