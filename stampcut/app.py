@@ -17,11 +17,18 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[handler, logging.StreamHandler()],
+        force=True,
     )
+
+
+def _log_uncaught(exc_type, exc, tb) -> None:
+    logging.getLogger("stampcut").critical("처리되지 않은 예외", exc_info=(exc_type, exc, tb))
+    sys.__excepthook__(exc_type, exc, tb)
 
 
 def main(argv: list[str] | None = None) -> int:
     setup_logging()
+    sys.excepthook = _log_uncaught
     logging.getLogger(__name__).info("StampCut %s 시작", __version__)
     from PySide6.QtWidgets import QApplication
 
