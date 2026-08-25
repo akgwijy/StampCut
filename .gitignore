@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.superpowers/
+build/
+dist/
+*.spec
+.pytest_cache/
+.coverage
