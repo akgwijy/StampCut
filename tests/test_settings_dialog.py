@@ -34,3 +34,15 @@ def test_dialog_rejects_bad_color(qtbot, monkeypatch):
 
 def test_ytdlp_version_is_string():
     assert isinstance(ytdlp_version(), str) and ytdlp_version()
+
+
+def test_ffmpeg_status_checks_app_dir(qtbot, tmp_path, monkeypatch):
+    from stampcut.gui import settings_dialog as sd
+
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "ffmpeg.exe").write_bytes(b"")
+    (tmp_path / "bin" / "ffprobe.exe").write_bytes(b"")
+    monkeypatch.setattr(sd.settings_mod, "app_dir", lambda: tmp_path)
+    d = sd.SettingsDialog(Settings(ffmpeg_path=""))
+    qtbot.addWidget(d)
+    assert "감지됨" in d.ffmpeg_status.text() and str(tmp_path / "bin" / "ffmpeg.exe") in d.ffmpeg_status.text()

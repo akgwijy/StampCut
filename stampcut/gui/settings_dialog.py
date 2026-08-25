@@ -150,7 +150,7 @@ class SettingsDialog(QDialog):
             self.ffmpeg_path.setText(f)
 
     def _refresh_ffmpeg_status(self) -> None:
-        found = find_ffmpeg(self.ffmpeg_path.text())
+        found = find_ffmpeg(self.ffmpeg_path.text(), settings_mod.app_dir())
         if found:
             self.ffmpeg_status.setText(f"감지됨: {found.ffmpeg}")
             self.ffmpeg_status.setStyleSheet("color: #2a8a2a")
@@ -190,8 +190,8 @@ class SettingsDialog(QDialog):
             post_seconds=self.post.value(),
             max_total_seconds=self.max_total.value(),
             cluster_window_seconds=self.cluster.value(),
-            output_dir=self.output_dir.text().strip() or "~/Videos/StampCut",
-            title_template=self.title_template.text().strip() or "{date} {channel} 하이라이트",
+            output_dir=self.output_dir.text().strip() or Settings().output_dir,
+            title_template=self.title_template.text().strip() or Settings().title_template,
             background_color=self.background.text().strip(),
             font_path=self.font_path.text().strip(),
             show_time_in_caption=self.show_time.isChecked(),

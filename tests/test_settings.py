@@ -1,4 +1,6 @@
 import json
+import sys
+from pathlib import Path
 
 from stampcut.core import settings as sm
 from stampcut.core.models import Settings
@@ -43,3 +45,11 @@ def test_resolve_font_and_output(tmp_path):
     assert sm.resolve_font(s) == tmp_path / "f.otf"
     assert sm.resolve_output_dir(s).name == "X" and "~" not in str(sm.resolve_output_dir(s))
     assert sm.resolve_font(Settings()) == sm.bundled_font_path()
+
+
+def test_app_dir_only_when_frozen(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert sm.app_dir() is None
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\apps\StampCut\StampCut.exe")
+    assert sm.app_dir() == Path(r"C:\apps\StampCut")

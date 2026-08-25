@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, fields
 from pathlib import Path
 
@@ -49,6 +50,11 @@ def resolve_font(s: Settings) -> Path:
 
 def resolve_output_dir(s: Settings) -> Path:
     return Path(s.output_dir).expanduser()
+
+
+def app_dir() -> Path | None:
+    """PyInstaller로 묶였을 때만 실행 파일 폴더를 돌려준다 (bin\\ffmpeg.exe 탐색용)."""
+    return Path(sys.executable).parent if getattr(sys, "frozen", False) else None
 
 
 def load(path: Path | None = None) -> Settings:
