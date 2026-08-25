@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
 
         self.preview = PreviewWidget(self.settings, load_font_family(settings_mod.resolve_font(self.settings)))
         self.preview.clip_changed.connect(self._on_clip_edited)
+        self.preview.style_changed.connect(self._on_style_changed)
 
         self.status_panel = StatusPanel()
         self.status_panel.render_requested.connect(self.start_render)
@@ -142,6 +143,10 @@ class MainWindow(QMainWindow):
         self.preview.set_settings(s)
         self.status_panel.set_output_dir(settings_mod.resolve_output_dir(s))
         self.status_panel.update_summary(self.project, s)
+
+    def _on_style_changed(self) -> None:
+        # PreviewWidget이 공유 Settings 객체를 직접 고쳤으므로 저장만 하면 된다
+        settings_mod.save(self.settings)
 
     # --- 분석 ---
     def start_analysis(self) -> None:

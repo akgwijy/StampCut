@@ -174,3 +174,17 @@ def test_render_refuses_zero_length_clip(qtbot, monkeypatch, tmp_path, make_vide
     _load_project(w, Project([v.url], "제목", [v], [clip]))
     w.start_render()
     assert warned and "0초" in warned[0] and rendered == []
+
+
+def test_style_change_saves_settings(qtbot, monkeypatch):
+    saved = []
+    monkeypatch.setattr(main_window.settings_mod, "save", lambda s, path=None: saved.append(s))
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.preview.title_y_spin.setValue(300)
+    assert saved and saved[-1] is w.settings and w.settings.title_y == 300
+    saved.clear()
+    w.preview._on_text_drag("caption", -30.0)
+    assert not saved  # 드래그 중에는 저장하지 않음
+    w.preview._on_text_drag_end()
+    assert saved and w.settings.caption_y == 1522
