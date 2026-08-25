@@ -38,8 +38,7 @@ class SquareGeometry:
 
 
 def _even(x: float) -> int:
-    n = int(round(x))
-    return n if n % 2 == 0 else n + 1
+    return int(round(x / 2)) * 2
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:

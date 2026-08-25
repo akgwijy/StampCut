@@ -1,4 +1,4 @@
-from stampcut.core.renderer import LAYOUT, compute_square_geometry
+from stampcut.core.renderer import LAYOUT, compute_square_geometry, _even
 
 
 def test_layout_constants_match_spec():
@@ -37,3 +37,15 @@ def test_values_are_clamped_and_even():
     assert g.sh == 3240 and g.crop_x == 0 and g.crop_y == 3240 - 1080
     g2 = compute_square_geometry(1280, 720, 1.0, 0.5, 0.5)
     assert g2.sw % 2 == 0 and g2.sh % 2 == 0
+
+
+def test_even_rounds_to_nearest_even():
+    assert _even(550.8) == 550
+    assert _even(551.2) == 552
+    assert _even(1080.0) == 1080
+    assert _even(607.5) == 608
+
+
+def test_zoom_051_uses_nearest_even_height():
+    g = compute_square_geometry(1920, 1080, 0.51, 0.5, 0.5)
+    assert g.sh == 550 and g.sw % 2 == 0
