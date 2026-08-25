@@ -1,14 +1,315 @@
+"""메인 창: 패널 조립과 분석 → 미리보기 → 렌더 흐름."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QMainWindow
+import logging
+import shutil
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Qt, QThreadPool, Signal
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHeaderView,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+    QTableView,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from stampcut import __version__
+from stampcut.core import pipeline
+from stampcut.core import settings as settings_mod
+from stampcut.core.downloader import Downloader, preview_covers
+from stampcut.core.ffmpeg import find_ffmpeg
+from stampcut.core.models import Clip, ClipStatus, Project, Settings
+from stampcut.core.renderer import unique_output_path
+from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
+from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, ClipTableModel, SecondsDelegate
+from stampcut.gui.preview_widget import PreviewWidget, load_font_family
+from stampcut.gui.settings_dialog import SettingsDialog
+from stampcut.gui.status_bar import StatusPanel
+from stampcut.gui.url_panel import UrlPanel
+from stampcut.gui.workers import Worker
+
+log = logging.getLogger(__name__)
+
+
+class _ClipBridge(QObject):
+    """워커 스레드의 on_clip 콜백을 GUI 스레드 시그널로 옮긴다."""
+
+    updated = Signal(object)
+
+
+def _analyze_job(urls, title, settings, client, progress, cancel):
+    try:
+        return pipeline.analyze(urls, title, settings, client, progress=progress, cancel=cancel)
+    except ApiKeyError as e:
+        raise RuntimeError(f"API 키가 잘못되었거나 YouTube Data API v3가 사용 설정되지 않았습니다.\n설정에서 키를 확인하세요.\n({e})") from e
+    except QuotaError as e:
+        raise RuntimeError(f"오늘의 API 할당량을 다 썼습니다. 내일 오후 4시(태평양 자정)에 초기화됩니다.\n({e})") from e
+    except VideoNotFound as e:
+        raise RuntimeError(f"영상을 찾을 수 없습니다 (비공개·삭제·잘못된 ID): {e.video_id}") from e
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    analysis_done = Signal()
+    render_done = Signal(object)
+
+    def __init__(self, settings: Settings | None = None) -> None:
         super().__init__()
+        self.settings = settings if settings is not None else settings_mod.load()
+        self.project: Project | None = None
+        self.pool = QThreadPool.globalInstance()
+        self._workers: list[Worker] = []
+        self._bridge = _ClipBridge()
+        self._bridge.updated.connect(self._on_clip_updated)
+        self._rebuild_tools()
+
         self.setWindowTitle(f"StampCut {__version__}")
         self.resize(1280, 820)
-        self.setCentralWidget(QLabel("StampCut", alignment=Qt.AlignCenter))
+        toolbar = QToolBar()
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        toolbar.addAction("⚙ 설정", self.open_settings)
+
+        self.url_panel = UrlPanel()
+        self.url_panel.analyze_requested.connect(self.start_analysis)
+        self.url_panel.title_edit.textChanged.connect(self._on_title_changed)
+
+        self.model = ClipTableModel(self.settings)
+        self.model.changed.connect(self._on_table_changed)
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setItemDelegateForColumn(COL_PRE, SecondsDelegate(self.table))
+        self.table.setItemDelegateForColumn(COL_POST, SecondsDelegate(self.table))
+        self.table.horizontalHeader().setSectionResizeMode(COL_CAPTION, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.selectionModel().currentRowChanged.connect(self._on_row_selected)
+        retry = QAction("미리보기 다시 받기", self.table)
+        retry.triggered.connect(self._retry_preview)
+        self.table.addAction(retry)
+        self.table.setContextMenuPolicy(Qt.ActionsContextMenu)
+
+        self.preview = PreviewWidget(self.settings, load_font_family(settings_mod.resolve_font(self.settings)))
+        self.preview.clip_changed.connect(self._on_clip_edited)
+
+        self.status_panel = StatusPanel()
+        self.status_panel.render_requested.connect(self.start_render)
+        self.status_panel.output_dir_changed.connect(self._on_output_dir_changed)
+        self.status_panel.set_output_dir(settings_mod.resolve_output_dir(self.settings))
+        self.status_panel.update_summary(None, self.settings)
+        if not self.settings.api_key:
+            self.status_panel.set_idle("⚙ 설정에서 YouTube API 키를 먼저 입력하세요")
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.table)
+        splitter.addWidget(self.preview)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.addWidget(self.url_panel)
+        layout.addWidget(splitter, 1)
+        layout.addWidget(self.status_panel)
+        self.setCentralWidget(central)
+
+    # --- 설정 ---
+    def _rebuild_tools(self) -> None:
+        # PyInstaller로 묶였을 때는 실행 파일 옆 bin\ffmpeg.exe를 먼저 찾는다 (스펙 §4 순서 ①).
+        self.ffpaths = find_ffmpeg(self.settings.ffmpeg_path, settings_mod.app_dir())
+        self.downloader = Downloader(settings_mod.cache_dir(), str(self.ffpaths.ffmpeg) if self.ffpaths else None)
+
+    def open_settings(self) -> None:
+        dlg = SettingsDialog(self.settings, self)
+        if dlg.exec() == SettingsDialog.Accepted:
+            self.apply_settings(dlg.result_settings())
+
+    def apply_settings(self, s: Settings) -> None:
+        self.settings = s
+        settings_mod.save(s)
+        self._rebuild_tools()
+        self.model.set_settings(s)
+        self.preview.set_settings(s)
+        self.status_panel.set_output_dir(settings_mod.resolve_output_dir(s))
+        self.status_panel.update_summary(self.project, s)
+
+    # --- 분석 ---
+    def start_analysis(self) -> None:
+        if self.url_panel.highlight_invalid():
+            self._warn("URL 형식이 잘못된 줄이 있습니다 (빨간 줄).")
+            return
+        urls = self.url_panel.urls()
+        if not urls:
+            self._warn("유튜브 URL을 입력하세요.")
+            return
+        if not self.settings.api_key:
+            self._warn("YouTube API 키가 필요합니다. 설정에서 입력하세요.")
+            self.open_settings()
+            return
+        self._set_busy(True)
+        self.status_panel.set_idle("댓글 분석 중")
+        w = Worker(_analyze_job, urls, self.url_panel.title(), self.settings, YouTubeClient(self.settings.api_key))
+        w.signals.finished.connect(self._on_analyzed)
+        w.signals.failed.connect(self._on_analyze_failed)
+        w.signals.cancelled.connect(lambda: self._set_busy(False))
+        self._start(w)
+
+    def _on_analyzed(self, project: Project) -> None:
+        self.project = project
+        self.url_panel.set_title(project.title)
+        self.model.set_clips(project.clips)
+        self.preview.set_title(project.title)
+        self.status_panel.update_summary(project, self.settings)
+        self._set_busy(False)
+        if not project.clips:
+            self.status_panel.set_idle("타임스탬프가 적힌 댓글이 없습니다")
+            self._info("타임스탬프가 적힌 댓글이 없습니다.")
+        else:
+            self.table.selectRow(0)
+            self.start_previews(project.clips)
+        self.analysis_done.emit()
+
+    def _on_analyze_failed(self, msg: str) -> None:
+        self._set_busy(False)
+        self.status_panel.set_idle("분석 실패")
+        self._warn(f"댓글 분석 실패:\n{msg}")
+
+    # --- 미리보기 ---
+    def start_previews(self, clips: list[Clip]) -> None:
+        assert self.project is not None
+        w = Worker(pipeline.fetch_previews, self.project, self.settings, self.downloader, self._bridge.updated.emit, clips=clips)
+        w.signals.finished.connect(lambda _: self.status_panel.set_idle("미리보기 준비됨"))
+        w.signals.failed.connect(lambda m: self.status_panel.set_idle(f"미리보기 오류: {m}"))
+        self._start(w)
+
+    def _on_clip_updated(self, clip: Clip) -> None:
+        self.model.refresh_row(clip)
+        if self.preview.clip is clip and clip.status is ClipStatus.READY:
+            self.preview.refresh_media()
+
+    def _retry_preview(self) -> None:
+        clip = self._selected_clip()
+        if clip and self.project:
+            clip.preview_path = None
+            self.start_previews([clip])
+
+    # --- 편집 ---
+    def _selected_clip(self) -> Clip | None:
+        idx = self.table.currentIndex()
+        return self.model.clip_at(idx.row()) if idx.isValid() else None
+
+    def _on_row_selected(self, current, _previous) -> None:
+        self.preview.set_clip(self.model.clip_at(current.row()) if current.isValid() else None)
+
+    def _on_clip_edited(self, clip: Clip) -> None:
+        self.model.refresh_row(clip)
+        self.status_panel.update_summary(self.project, self.settings)
+        if self.project and clip.status is ClipStatus.READY and not preview_covers(clip, self.settings):
+            self.start_previews([clip])
+
+    def _on_table_changed(self) -> None:
+        self.status_panel.update_summary(self.project, self.settings)
+        clip = self._selected_clip()
+        if clip is not None and self.preview.clip is clip:
+            self.preview.sync_from_clip()
+
+    def _on_title_changed(self, text: str) -> None:
+        if self.project:
+            self.project.title = text
+        self.preview.set_title(text)
+
+    def _on_output_dir_changed(self, d: str) -> None:
+        self.settings.output_dir = d
+        settings_mod.save(self.settings)
+
+    # --- 렌더 ---
+    def start_render(self) -> None:
+        if not self.project or not self.project.enabled_clips():
+            self._warn("켜진 클립이 없습니다.")
+            return
+        if self.ffpaths is None:
+            self._warn("ffmpeg를 찾지 못했습니다. 설정에서 경로를 지정하세요.\n(설치: winget install Gyan.FFmpeg)")
+            self.open_settings()
+            return
+        broken = [c for c in self.project.enabled_clips() if c.status is ClipStatus.ERROR]
+        if broken:
+            names = ", ".join(f"{c.video.short_name} {c.t // 60}:{c.t % 60:02d}" for c in broken)
+            if QMessageBox.question(self, "StampCut", f"미리보기 다운로드에 실패한 클립이 켜져 있습니다:\n{names}\n\n그래도 시도할까요? (실패하면 빼고 계속합니다)") != QMessageBox.Yes:
+                return
+        out_dir = self.status_panel.output_dir()
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._warn(f"출력 폴더를 만들 수 없습니다:\n{e}")
+            return
+        # 예상 크기(1080x1920 crf18 ≈ 3MB/s)의 2배가 없으면 중단 (스펙 §10)
+        need = self.project.total_duration(self.settings) * 3_000_000 * 2
+        free = shutil.disk_usage(out_dir).free
+        if free < need:
+            self._warn(f"출력 드라이브 여유 공간이 부족합니다.\n필요 약 {need // 1_000_000} MB, 남은 공간 {free // 1_000_000} MB")
+            return
+        output = unique_output_path(out_dir, self.project.title or "highlight")
+        self._set_busy(True)
+        self.status_panel.set_idle("렌더링 준비")
+        w = Worker(pipeline.render, self.project, self.settings, output, self.downloader, self.ffpaths, on_clip_failed=lambda clip, why: True)
+        w.signals.finished.connect(self._on_rendered)
+        w.signals.failed.connect(self._on_render_failed)
+        w.signals.cancelled.connect(lambda: (self._set_busy(False), self.status_panel.set_idle("취소됨")))
+        self._start(w)
+
+    def _on_rendered(self, path: Path) -> None:
+        self._set_busy(False)
+        assert self.project is not None
+        self.model.set_clips(self.project.clips)
+        self.status_panel.update_summary(self.project, self.settings)
+        self.status_panel.set_done(path)
+        skipped = [c for c in self.project.clips if c.status is ClipStatus.ERROR and not c.enabled]
+        if skipped:
+            names = "\n".join(f"- {c.video.short_name} {c.t // 60}:{c.t % 60:02d}: {c.error}" for c in skipped)
+            self._info(f"완성했지만 다운로드 실패로 {len(skipped)}개 클립을 뺐습니다:\n{names}")
+        self.render_done.emit(path)
+
+    def _on_render_failed(self, msg: str) -> None:
+        self._set_busy(False)
+        self.status_panel.set_idle("렌더링 실패")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("StampCut")
+        box.setText("렌더링에 실패했습니다. 자세한 내용은 아래를 펼쳐 보세요.\nyt-dlp 오류라면 설정 → yt-dlp 업데이트를 먼저 시도하세요.")
+        box.setDetailedText(msg)
+        box.exec()
+
+    # --- 공통 ---
+    def _start(self, w: Worker) -> None:
+        self._workers = [x for x in self._workers if not x.done]
+        w.signals.progress.connect(self.status_panel.set_progress)
+        self._workers.append(w)
+        self.pool.start(w)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.url_panel.set_busy(busy)
+        self.status_panel.set_busy(busy)
+        self.table.setEnabled(not busy)
+
+    def _warn(self, text: str) -> None:
+        QMessageBox.warning(self, "StampCut", text)
+
+    def _info(self, text: str) -> None:
+        QMessageBox.information(self, "StampCut", text)
+
+    def closeEvent(self, event) -> None:
+        active = [w for w in self._workers if not w.done]
+        if active:
+            if QMessageBox.question(self, "StampCut", "작업이 진행 중입니다. 취소하고 종료할까요?") != QMessageBox.Yes:
+                event.ignore()
+                return
+            for w in active:
+                w.cancel.set()
+            self.pool.waitForDone(5000)
+        self.preview.player.stop()
+        event.accept()
