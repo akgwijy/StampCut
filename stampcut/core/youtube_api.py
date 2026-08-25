@@ -67,7 +67,7 @@ def _raw(item: dict, is_reply: bool) -> RawComment:
     sn = item["snippet"]
     return RawComment(
         id=item["id"],
-        text=sn.get("textOriginal", ""),
+        text=sn.get("textOriginal") or sn.get("textDisplay", ""),
         author=sn.get("authorDisplayName", ""),
         like_count=int(sn.get("likeCount", 0)),
         is_reply=is_reply,
@@ -111,7 +111,8 @@ class YouTubeClient:
             raise VideoNotFound("", msg)
         raise YouTubeApiError(f"HTTP {r.status_code}: {msg}")
 
-    def fetch_video_infos(self, urls: list[str]) -> list[VideoInfo]:
+    def fetch_video_infos(self, urls: list[str], strict: bool = True) -> list[VideoInfo]:
+        """strict=False면 응답에 없는 영상은 건너뛴다. 하나도 못 찾았을 때만 VideoNotFound."""
         ids: list[str] = []
         for u in urls:
             vid = parse_video_id(u)
@@ -124,10 +125,14 @@ class YouTubeClient:
             for it in data.get("items", []):
                 items[it["id"]] = it
         infos: list[VideoInfo] = []
+        missing: list[str] = []
         for idx, (u, vid) in enumerate(zip(urls, ids)):
             it = items.get(vid)
             if not it or "snippet" not in it or "contentDetails" not in it:
-                raise VideoNotFound(vid)
+                if strict:
+                    raise VideoNotFound(vid)
+                missing.append(vid)
+                continue
             sn = it["snippet"]
             infos.append(
                 VideoInfo(
@@ -142,6 +147,8 @@ class YouTubeClient:
                     comment_count=int(it.get("statistics", {}).get("commentCount", 0)),
                 )
             )
+        if not infos and missing:
+            raise VideoNotFound(missing[0])
         return infos
 
     def _fetch_replies(self, parent_id: str) -> list[RawComment]:

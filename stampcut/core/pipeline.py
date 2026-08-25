@@ -5,6 +5,7 @@ fetch_previews의 on_clip은 여러 워커 스레드에서 동시에 호출되�
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import threading
 import uuid
@@ -20,7 +21,7 @@ from stampcut.core.models import Clip, ClipStatus, Mention, Project, Settings, V
 from stampcut.core.renderer import build_clip_command, build_concat_command, write_concat_list
 from stampcut.core.settings import render_dir, resolve_font
 from stampcut.core.timestamps import extract_mentions, format_time
-from stampcut.core.youtube_api import YouTubeClient
+from stampcut.core.youtube_api import YouTubeClient, parse_video_id
 
 log = logging.getLogger(__name__)
 ProgressFn = Callable[[str, int, int, str], None]
@@ -52,7 +53,9 @@ def analyze(
     total = len(urls) + 1
     progress("analyze", 0, total, "영상 정보 가져오는 중")
     _check(cancel)
-    videos = client.fetch_video_infos(urls)
+    videos = client.fetch_video_infos(urls, strict=False)
+    found = {v.video_id for v in videos}
+    missing = [u for u in urls if parse_video_id(u) not in found]
     mentions: list[Mention] = []
     for i, v in enumerate(videos):
         _check(cancel)
@@ -62,7 +65,13 @@ def analyze(
     clips = build_clips(mentions, videos, s)
     log.info("analyze: %d videos, %d mentions, %d clips", len(videos), len(mentions), len(clips))
     progress("analyze", total, total, f"후보 {len(clips)}개")
-    return Project(urls=list(urls), title=title.strip() or default_title(videos, s), videos=videos, clips=clips)
+    return Project(
+        urls=list(urls),
+        title=title.strip() or default_title(videos, s),
+        videos=videos,
+        clips=clips,
+        warnings=[f"영상을 찾을 수 없어 건너뜀: {u}" for u in missing],
+    )
 
 
 def _preview_one(clip: Clip, s: Settings, downloader: Downloader, on_clip: Callable[[Clip], None], cancel) -> None:
@@ -145,6 +154,9 @@ def render(
                 continue
             raise
 
+    if not kept:
+        raise ValueError("모든 클립의 다운로드에 실패했습니다")
+
     outputs: list[Path] = []
     total_units = len(kept) * 100
     for i, c in enumerate(kept):
@@ -161,8 +173,13 @@ def render(
         outputs.append(out)
 
     progress("concat", 0, 1, "합치는 중")
+    tmp_output = job / "output.mp4"
+    ff.run(build_concat_command(paths, write_concat_list(outputs, job), tmp_output), cancel=cancel)
+    # 성공했을 때만 결과 파일이 생기도록 임시 파일을 옮긴다 (취소/실패는 output_path를 남기지 않는다).
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    ff.run(build_concat_command(paths, write_concat_list(outputs, job), output_path), cancel=cancel)
-    shutil.rmtree(job, ignore_errors=True)
+    os.replace(tmp_output, output_path)
+    for d in render_dir().iterdir():  # 이번 작업 폴더와 이전에 남은 찌꺼기를 함께 지운다
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
     progress("concat", 1, 1, "완료")
     return output_path

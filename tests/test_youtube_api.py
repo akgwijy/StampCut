@@ -94,6 +94,21 @@ def test_fetch_video_infos_missing_raises():
     assert ei.value.video_id == VID_A
 
 
+@responses.activate
+def test_fetch_video_infos_non_strict_skips_missing():
+    responses.get(f"{BASE_URL}/videos", json={"items": [video_item(VID_B)]})
+    infos = YouTubeClient("KEY").fetch_video_infos([f"https://youtu.be/{VID_A}", VID_B], strict=False)
+    assert [(v.index, v.video_id) for v in infos] == [(1, VID_B)]
+
+
+@responses.activate
+def test_fetch_video_infos_non_strict_all_missing_raises():
+    responses.get(f"{BASE_URL}/videos", json={"items": []})
+    with pytest.raises(VideoNotFound) as ei:
+        YouTubeClient("KEY").fetch_video_infos([f"https://youtu.be/{VID_A}", VID_B], strict=False)
+    assert ei.value.video_id == VID_A
+
+
 def test_fetch_video_infos_bad_url_raises_value_error():
     with pytest.raises(ValueError):
         YouTubeClient("KEY").fetch_video_infos(["nope"])
@@ -216,3 +231,18 @@ def test_fetch_all_comments_disabled_mid_pagination_returns_partial():
     responses.add_callback(responses.GET, f"{BASE_URL}/commentThreads", callback=threads_cb, content_type="application/json")
     out = YouTubeClient("KEY").fetch_all_comments(VID_A)
     assert [c.id for c in out] == ["c1"]
+
+
+@responses.activate
+def test_comment_falls_back_to_text_display():
+    item = {
+        "id": "c1",
+        "snippet": {
+            "topLevelComment": {"id": "c1", "snippet": {"textDisplay": "7:05 하이라이트", "authorDisplayName": "@a", "likeCount": 2}},
+            "totalReplyCount": 0,
+        },
+        "replies": {"comments": []},
+    }
+    responses.get(f"{BASE_URL}/commentThreads", json={"items": [item]})
+    out = YouTubeClient("KEY").fetch_all_comments(VID_A)
+    assert [c.text for c in out] == ["7:05 하이라이트"]

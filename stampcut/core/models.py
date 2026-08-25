@@ -110,6 +110,7 @@ class Project:
     title: str
     videos: list[VideoInfo]
     clips: list[Clip]
+    warnings: list[str] = field(default_factory=list)
 
     def enabled_clips(self) -> list[Clip]:
         return [c for c in self.clips if c.enabled]

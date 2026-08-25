@@ -13,7 +13,7 @@ class FakeClient:
     def __init__(self, videos, comments):
         self.videos, self.comments = videos, comments
 
-    def fetch_video_infos(self, urls):
+    def fetch_video_infos(self, urls, strict=True):
         return self.videos
 
     def fetch_all_comments(self, video_id):
@@ -65,6 +65,15 @@ def test_analyze_keeps_given_title_and_cancel(make_video):
     cancel.set()
     with pytest.raises(Cancelled):
         pipeline.analyze([v.url], "", Settings(), client, cancel=cancel)
+
+
+def test_analyze_warns_on_missing_video(make_video):
+    v = make_video()
+    client = FakeClient([v], {v.video_id: [comment("c1", "7:05 기훈 선방")]})
+    missing_url = "https://youtu.be/" + "B" * 11
+    p = pipeline.analyze([v.url, missing_url], "", Settings(), client)
+    assert len(p.warnings) == 1 and missing_url in p.warnings[0]
+    assert [c.t for c in p.clips] == [425]
 
 
 def test_fetch_previews_updates_status(tmp_path, make_video, make_clip):
@@ -145,11 +154,15 @@ def test_render_flow(fake_ffmpeg, tmp_path, make_video, make_clip):
     dl = FakeDownloader(tmp_path)
     p = Project([v.url], "제목", [v], [a, b, c])
     out = tmp_path / "out" / "제목.mp4"
+    stale = tmp_path / "render" / "old-job"
+    stale.mkdir(parents=True)
+    (stale / "x.txt").write_text("남은 찌꺼기", "utf-8")
     prog = []
     result = pipeline.render(p, Settings(), out, dl, _paths(tmp_path), progress=lambda *x: prog.append(x))
     assert result == out and out.exists()
     assert [t for kind, t in dl.calls if kind == "final"] == [100, 900]
     assert len(fake_ffmpeg) == 3 and "concat" in fake_ffmpeg[-1]
+    assert not stale.exists()
     assert not any((tmp_path / "render").iterdir())
     stages = [x[0] for x in prog]
     assert stages[0] == "download" and "render" in stages and prog[-1][:2] == ("concat", 1)
@@ -173,7 +186,37 @@ def test_render_raises_when_failure_not_allowed(fake_ffmpeg, tmp_path, make_vide
     dl = FakeDownloader(tmp_path, fail_ids={c.id})
     with pytest.raises(DownloadFailed):
         pipeline.render(Project([v.url], "제목", [v], [c]), Settings(), tmp_path / "o.mp4", dl, _paths(tmp_path))
+    assert not (tmp_path / "o.mp4").exists()
     assert any((tmp_path / "render").iterdir())
+
+
+def test_render_all_clips_skipped_raises(fake_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    a, c = make_clip(v, 100), make_clip(v, 900)
+    dl = FakeDownloader(tmp_path, fail_ids={a.id, c.id})
+    p = Project([v.url], "제목", [v], [a, c])
+    with pytest.raises(ValueError):
+        pipeline.render(p, Settings(), tmp_path / "o.mp4", dl, _paths(tmp_path), on_clip_failed=lambda clip, why: True)
+    assert fake_ffmpeg == [] and not (tmp_path / "o.mp4").exists()
+
+
+def test_render_cancel_leaves_no_output(tmp_path, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(pipeline, "render_dir", lambda: tmp_path / "render")
+    monkeypatch.setattr(pipeline.ff, "probe", lambda paths, f: ProbeInfo(1920, 1080, 18.0, True))
+
+    def fake_run(cmd, on_progress=None, cancel=None, total_seconds=None):
+        if "concat" in cmd:
+            raise Cancelled()
+        Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+        Path(cmd[-1]).write_bytes(b"x")
+
+    monkeypatch.setattr(pipeline.ff, "run", fake_run)
+    v = make_video()
+    c = make_clip(v, 100)
+    output = tmp_path / "out" / "o.mp4"
+    with pytest.raises(Cancelled):
+        pipeline.render(Project([v.url], "제목", [v], [c]), Settings(), output, FakeDownloader(tmp_path), _paths(tmp_path))
+    assert not output.exists()
 
 
 def test_render_without_enabled_clips(tmp_path, make_video, make_clip):
