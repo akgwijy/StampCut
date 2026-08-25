@@ -41,6 +41,20 @@ class FailingYdl(FakeYdl):
         raise DownloadError("boom")
 
 
+class PartialThenCancelYdl(FakeYdl):
+    def download(self, urls):
+        out = self.opts["outtmpl"]
+        Path(out + ".part").write_bytes(b"partial")
+        Path(out).with_suffix("").with_name(Path(out).stem + ".f137.mp4").write_bytes(b"x")
+        for hook in self.opts["progress_hooks"]:
+            hook({"status": "downloading", "downloaded_bytes": 50, "total_bytes": 100})
+
+
+class SilentYdl(FakeYdl):
+    def download(self, urls):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _reset_calls():
     FakeYdl.calls.clear()
@@ -99,8 +113,10 @@ def test_cancel_raises_and_removes_partial(tmp_path, make_video, make_clip):
     cancel = threading.Event()
     cancel.set()
     with pytest.raises(DownloadCancelled):
-        Downloader(tmp_path, None, FakeYdl).download_preview(clip, Settings(), cancel=cancel)
-    assert not (tmp_path / "POZWcyKFvjY" / "preview_728_818.mp4").exists()
+        Downloader(tmp_path, None, PartialThenCancelYdl).download_preview(clip, Settings(), cancel=cancel)
+    video_dir = tmp_path / "POZWcyKFvjY"
+    assert not (video_dir / "preview_728_818.mp4").exists()
+    assert list(video_dir.iterdir()) == []
 
 
 def test_download_error_maps_to_download_failed(tmp_path, make_video, make_clip):
@@ -108,3 +124,10 @@ def test_download_error_maps_to_download_failed(tmp_path, make_video, make_clip)
     with pytest.raises(DownloadFailed) as ei:
         Downloader(tmp_path, None, FailingYdl).download_final(clip, Settings())
     assert "boom" in str(ei.value)
+
+
+def test_no_output_raises_download_failed(tmp_path, make_video, make_clip):
+    clip = make_clip(make_video(duration=1449), t=758)
+    with pytest.raises(DownloadFailed) as ei:
+        Downloader(tmp_path, None, SilentYdl).download_final(clip, Settings())
+    assert "결과 파일" in str(ei.value)

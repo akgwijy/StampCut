@@ -24,6 +24,13 @@ class DownloadCancelled(Exception):
     pass
 
 
+def _remove_partials(out: Path) -> None:
+    """out 자체와 yt-dlp가 남긴 .part / .fNNN 중간 파일을 지운다."""
+    for p in out.parent.glob(out.stem + "*"):
+        if p.is_file():
+            p.unlink(missing_ok=True)
+
+
 def preview_range(clip: Clip, s: Settings) -> tuple[int, int]:
     a = min(max(0, clip.t - s.preview_margin_pre), clip.start(s))
     b = max(min(clip.video.duration, clip.t + s.preview_margin_post), clip.end(s))
@@ -93,11 +100,12 @@ class Downloader:
             with self.ydl_factory(opts) as ydl:
                 ydl.download([url])
         except DownloadCancelled:
-            out.unlink(missing_ok=True)
+            _remove_partials(out)
             raise
         except DownloadError as e:
             raise DownloadFailed(str(e)) from e
         if not out.exists() or out.stat().st_size == 0:
+            _remove_partials(out)
             raise DownloadFailed("다운로드 결과 파일이 없습니다")
         return out
 
