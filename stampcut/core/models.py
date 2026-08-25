@@ -24,6 +24,10 @@ class Settings:
     parallel_downloads: int = 2
     preview_margin_pre: int = 30
     preview_margin_post: int = 60
+    title_y: int = 210  # 타이틀 블록 세로 중심 (기존 420px 밴드 중앙과 동일)
+    title_color: str = "#FFFFFF"
+    caption_y: int = 1552  # 자막 블록 상단
+    caption_color: str = "#FFFFFF"
 
 
 @dataclass

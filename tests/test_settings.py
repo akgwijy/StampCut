@@ -53,3 +53,15 @@ def test_app_dir_only_when_frozen(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", r"C:\apps\StampCut\StampCut.exe")
     assert sm.app_dir() == Path(r"C:\apps\StampCut")
+
+
+def test_style_fields_roundtrip_and_legacy_defaults(tmp_path):
+    p = tmp_path / "s.json"
+    s = Settings(title_y=300, title_color="#ff0000", caption_y=1400, caption_color="#00ff00")
+    sm.save(s, p)
+    assert sm.load(p) == s
+    # 스타일 필드가 없는 구버전 설정 파일 → 기본값 (기존 출력과 동일한 배치)
+    p.write_text(json.dumps({"api_key": "K"}), "utf-8")
+    old = sm.load(p)
+    assert (old.title_y, old.title_color) == (210, "#FFFFFF")
+    assert (old.caption_y, old.caption_color) == (1552, "#FFFFFF")
