@@ -84,6 +84,7 @@ class StatusPanel(QWidget):
         self._busy = busy
         self.render_btn.setEnabled(self._clip_count > 0 and not busy)
         if busy:
+            self._result = None
             self.open_folder_btn.hide()
             self.play_btn.hide()
             self.progress.setValue(0)
@@ -95,7 +96,11 @@ class StatusPanel(QWidget):
         self.open_folder_btn.show()
         self.play_btn.show()
 
+    def has_result(self) -> bool:
+        return self._result is not None
+
     def set_idle(self, message: str = "") -> None:
+        self._result = None
         self.progress.setValue(0)
         self.message.setText(message)
         self.open_folder_btn.hide()

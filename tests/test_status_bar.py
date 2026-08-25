@@ -29,7 +29,9 @@ def test_summary_busy_and_done(qtbot, tmp_path, make_video, make_clip):
     out = tmp_path / "x.mp4"
     p.set_done(out)
     assert p.progress.value() == 100 and not p.open_folder_btn.isHidden() and "x.mp4" in p.message.text()
+    assert p.has_result()
     p.set_idle("대기")
     assert p.progress.value() == 0 and p.open_folder_btn.isHidden()
+    assert not p.has_result()
     p.set_output_dir(tmp_path)
     assert p.output_dir() == tmp_path and str(tmp_path) in p.output_btn.text()

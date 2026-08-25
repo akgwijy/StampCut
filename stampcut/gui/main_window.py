@@ -64,6 +64,8 @@ class MainWindow(QMainWindow):
         self.project: Project | None = None
         self.pool = QThreadPool.globalInstance()
         self._workers: list[Worker] = []
+        self._render_worker: Worker | None = None
+        self._render_candidates: set[str] = set()
         self._bridge = _ClipBridge()
         self._bridge.updated.connect(self._on_clip_updated)
         self._rebuild_tools()
@@ -183,9 +185,19 @@ class MainWindow(QMainWindow):
     def start_previews(self, clips: list[Clip]) -> None:
         assert self.project is not None
         w = Worker(pipeline.fetch_previews, self.project, self.settings, self.downloader, self._bridge.updated.emit, clips=clips)
-        w.signals.finished.connect(lambda _: self.status_panel.set_idle("미리보기 준비됨"))
-        w.signals.failed.connect(lambda m: self.status_panel.set_idle(f"미리보기 오류: {m}"))
-        self._start(w)
+        w.signals.finished.connect(self._on_previews_finished)
+        w.signals.failed.connect(self._on_previews_failed)
+        self._start(w, drive_status=not self._rendering())
+
+    def _on_previews_finished(self, _result) -> None:
+        if self._rendering() or self.status_panel.has_result():
+            return
+        self.status_panel.set_idle("미리보기 준비됨")
+
+    def _on_previews_failed(self, msg: str) -> None:
+        if self._rendering() or self.status_panel.has_result():
+            return
+        self.status_panel.set_idle(f"미리보기 오류: {msg}")
 
     def _on_clip_updated(self, clip: Clip) -> None:
         self.model.refresh_row(clip)
@@ -256,10 +268,12 @@ class MainWindow(QMainWindow):
         output = unique_output_path(out_dir, self.project.title or "highlight")
         self._set_busy(True)
         self.status_panel.set_idle("렌더링 준비")
+        self._render_candidates = {c.id for c in self.project.enabled_clips()}
         w = Worker(pipeline.render, self.project, self.settings, output, self.downloader, self.ffpaths, on_clip_failed=lambda clip, why: True)
         w.signals.finished.connect(self._on_rendered)
         w.signals.failed.connect(self._on_render_failed)
         w.signals.cancelled.connect(lambda: (self._set_busy(False), self.status_panel.set_idle("취소됨")))
+        self._render_worker = w
         self._start(w)
 
     def _on_rendered(self, path: Path) -> None:
@@ -268,7 +282,7 @@ class MainWindow(QMainWindow):
         self.model.set_clips(self.project.clips)
         self.status_panel.update_summary(self.project, self.settings)
         self.status_panel.set_done(path)
-        skipped = [c for c in self.project.clips if c.status is ClipStatus.ERROR and not c.enabled]
+        skipped = [c for c in self.project.clips if c.id in self._render_candidates and not c.enabled]
         if skipped:
             names = "\n".join(f"- {c.video.short_name} {c.t // 60}:{c.t % 60:02d}: {c.error}" for c in skipped)
             self._info(f"완성했지만 다운로드 실패로 {len(skipped)}개 클립을 뺐습니다:\n{names}")
@@ -285,9 +299,13 @@ class MainWindow(QMainWindow):
         box.exec()
 
     # --- 공통 ---
-    def _start(self, w: Worker) -> None:
+    def _rendering(self) -> bool:
+        return self._render_worker is not None and not self._render_worker.done
+
+    def _start(self, w: Worker, drive_status: bool = True) -> None:
         self._workers = [x for x in self._workers if not x.done]
-        w.signals.progress.connect(self.status_panel.set_progress)
+        if drive_status:
+            w.signals.progress.connect(self.status_panel.set_progress)
         self._workers.append(w)
         self.pool.start(w)
 
@@ -295,6 +313,7 @@ class MainWindow(QMainWindow):
         self.url_panel.set_busy(busy)
         self.status_panel.set_busy(busy)
         self.table.setEnabled(not busy)
+        self.preview.setEnabled(not busy)
 
     def _warn(self, text: str) -> None:
         QMessageBox.warning(self, "StampCut", text)
@@ -311,5 +330,6 @@ class MainWindow(QMainWindow):
             for w in active:
                 w.cancel.set()
             self.pool.waitForDone(5000)
+            self._bridge.blockSignals(True)
         self.preview.player.stop()
         event.accept()
