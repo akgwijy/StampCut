@@ -25,6 +25,7 @@ def comment(text, **kw):
         ("14:05 오프사이드 기가막히게 거네...", [(845, "오프사이드 기가막히게 거네...")]),
         ("12:38", [(758, "")]),
         ("좋은 경기였습니다", []),
+        ("7:05분 아 이렇게 쓰면", [(425, "아 이렇게 쓰면")]),
     ],
 )
 def test_extract_single_line(make_video, text, expected):
@@ -57,6 +58,19 @@ def test_mention_carries_comment_metadata(make_video):
 
 def test_find_timestamps_positions():
     assert find_timestamps("ab 7:05 cd", 10000) == [(425, (3, 7))]
+
+
+def test_find_timestamps_drops_overlapping_hangul_match():
+    assert find_timestamps("7:05분 x", 100000) == [(425, (0, 4))]
+
+
+def test_find_timestamps_hangul_boundary_rejection():
+    assert find_timestamps("12분 75초 역습", 100000) == []
+    assert find_timestamps("1시간 75분", 100000) == []
+
+
+def test_find_timestamps_adjacent_digit_exclusion():
+    assert find_timestamps("12:345", 100000) == []
 
 
 def test_format_time():

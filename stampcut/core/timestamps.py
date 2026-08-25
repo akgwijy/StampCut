@@ -23,8 +23,8 @@ def _hms(h: int, m: int, s: int, *, hour_given: bool) -> int | None:
     return h * 3600 + m * 60 + s
 
 
-def find_timestamps(line: str, max_seconds: int) -> list[tuple[int, tuple[int, int]]]:
-    """줄에서 (초, (시작, 끝) 위치) 목록을 등장 순서로 돌려준다."""
+def _scan(line: str, max_seconds: int) -> list[tuple[int, tuple[int, int]]]:
+    """줄에서 유효한 매치를 전부(겹침 포함) 시작 위치 순으로 돌려준다."""
     found: list[tuple[int, tuple[int, int]]] = []
     for m in _COLON_RE.finditer(line):
         h = int(m.group(1)) if m.group(1) else 0
@@ -44,22 +44,47 @@ def find_timestamps(line: str, max_seconds: int) -> list[tuple[int, tuple[int, i
     return found
 
 
+def _dedup_overlaps(matches: list[tuple[int, tuple[int, int]]]) -> list[tuple[int, tuple[int, int]]]:
+    """시작 위치 순 매치 목록에서, 앞선 매치와 겹치는 매치는 버리고 앞선 쪽만 남긴다."""
+    disjoint: list[tuple[int, tuple[int, int]]] = []
+    prev_end = -1
+    for secs, span in matches:
+        if span[0] < prev_end:
+            continue
+        disjoint.append((secs, span))
+        prev_end = span[1]
+    return disjoint
+
+
+def find_timestamps(line: str, max_seconds: int) -> list[tuple[int, tuple[int, int]]]:
+    """줄에서 (초, (시작, 끝) 위치) 목록을 등장 순서로 돌려준다.
+    서로 겹치는 매치는 시작 위치가 앞선 쪽만 남긴다."""
+    return _dedup_overlaps(_scan(line, max_seconds))
+
+
 def _caption_without(line: str, spans: list[tuple[int, int]]) -> str:
+    merged: list[tuple[int, int]] = []
+    for a, b in sorted(spans):
+        if merged and a < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
     chars = list(line)
-    for a, b in sorted(spans, reverse=True):
+    for a, b in sorted(merged, reverse=True):
         del chars[a:b]
     text = " ".join("".join(chars).split())
-    return text.strip(_TRIM_CHARS).strip()
+    return text.strip(_TRIM_CHARS)
 
 
 def extract_mentions(video: VideoInfo, comment: RawComment) -> list[Mention]:
     out: list[Mention] = []
     seen: set[int] = set()
     for line in comment.text.splitlines():
-        found = find_timestamps(line, video.duration)
+        matches = _scan(line, video.duration)
+        found = _dedup_overlaps(matches)
         if not found:
             continue
-        caption = _caption_without(line, [span for _, span in found])
+        caption = _caption_without(line, [span for _, span in matches])
         for secs, _ in found:
             if secs in seen:
                 continue
