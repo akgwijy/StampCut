@@ -46,3 +46,22 @@ def test_widget_controls_update_clip(qtbot, make_video, make_clip):
     assert clip.pre is None and clip.post is None and clip.zoom == 1.0 and (clip.pan_x, clip.pan_y) == (0.5, 0.5)
     w.set_clip(None)
     assert not w.pre_spin.isEnabled()
+
+
+def test_set_settings_updates_background(qtbot, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.set_settings(Settings(background_color="#112233"))
+    assert w.square.brush().color().name() == "#112233"
+    assert w.bg_item.brush().color().name() == "#112233"
+
+
+def test_zoom_snaps_to_five_hundredths(qtbot, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    clip = make_clip(make_video(), t=758)
+    w.set_clip(clip)
+    with qtbot.waitSignal(w.clip_changed, timeout=1000):
+        w.zoom_slider.setValue(203)
+    assert w.zoom_slider.value() == 205 and abs(clip.zoom - 2.05) < 1e-9
+    assert w.zoom_slider.singleStep() == 5

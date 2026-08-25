@@ -97,13 +97,13 @@ class PreviewWidget(QWidget):
 
         L = LAYOUT
         self.scene = QGraphicsScene(0, 0, L["canvas_w"], L["canvas_h"])
-        self.scene.addRect(QRectF(0, 0, L["canvas_w"], L["canvas_h"]), QPen(Qt.NoPen), QBrush(QColor(settings.background_color)))
+        self.bg_item = self.scene.addRect(QRectF(0, 0, L["canvas_w"], L["canvas_h"]), QPen(Qt.NoPen), QBrush(QColor(settings.background_color)))
         self.square = QGraphicsRectItem(0, 0, _S, _S)
-        self.square.setBrush(QBrush(QColor(settings.background_color)))
         self.square.setPen(QPen(Qt.NoPen))
         self.square.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
         self.square.setPos(0, L["square_y"])
         self.scene.addItem(self.square)
+        self._apply_background()
         self.video_item = QGraphicsVideoItem(self.square)
         self.video_item.nativeSizeChanged.connect(self._on_native_size)
 
@@ -124,6 +124,10 @@ class PreviewWidget(QWidget):
         self.pos_label = QLabel("0:00 / 0:00")
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setRange(int(ZOOM_MIN * 100), int(ZOOM_MAX * 100))
+        self.zoom_slider.setSingleStep(5)
+        self.zoom_slider.setPageStep(25)
+        self.zoom_slider.setTickInterval(5)
+        self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.zoom_slider.setValue(100)
         self.zoom_slider.valueChanged.connect(self._on_zoom)
         self.zoom_label = QLabel("1.00×")
@@ -182,9 +186,15 @@ class PreviewWidget(QWidget):
         for w in (self.play_btn, self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit, self.reset_btn):
             w.setEnabled(on)
 
+    def _apply_background(self) -> None:
+        brush = QBrush(QColor(self.settings.background_color))
+        self.bg_item.setBrush(brush)
+        self.square.setBrush(brush)
+
     # --- 외부 API ---
     def set_settings(self, settings: Settings) -> None:
         self.settings = settings
+        self._apply_background()
         self.relayout()
 
     def set_title(self, title: str) -> None:
@@ -275,6 +285,9 @@ class PreviewWidget(QWidget):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
             self.play_btn.setText("▶ 재생")
+        elif self.player.playbackState() == QMediaPlayer.PlaybackState.PausedState and self._loaded_path is not None:
+            self.player.play()
+            self.play_btn.setText("⏸ 일시정지")
         else:
             self.refresh_media()
 
@@ -299,9 +312,14 @@ class PreviewWidget(QWidget):
         self._emit()
 
     def _on_zoom(self, value: int) -> None:
+        snapped = int(round(value / 5)) * 5
+        if snapped != value:
+            self.zoom_slider.blockSignals(True)
+            self.zoom_slider.setValue(snapped)
+            self.zoom_slider.blockSignals(False)
         if self.clip is None:
             return
-        self.clip.zoom = value / 100
+        self.clip.zoom = snapped / 100
         self.zoom_label.setText(f"{self.clip.zoom:.2f}×")
         self.relayout()
         self._emit()
