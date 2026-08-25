@@ -22,7 +22,8 @@ def setup_logging() -> None:
 
 
 def _log_uncaught(exc_type, exc, tb) -> None:
-    logging.getLogger("stampcut").critical("처리되지 않은 예외", exc_info=(exc_type, exc, tb))
+    if not issubclass(exc_type, KeyboardInterrupt):
+        logging.getLogger("stampcut").critical("처리되지 않은 예외", exc_info=(exc_type, exc, tb))
     sys.__excepthook__(exc_type, exc, tb)
 
 

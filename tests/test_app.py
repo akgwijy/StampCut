@@ -2,7 +2,24 @@ import logging
 import logging.handlers
 import sys
 
+import pytest
+
 from stampcut import app
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging():
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    yield
+    for h in list(root.handlers):
+        if h not in saved_handlers:
+            root.removeHandler(h)
+            h.close()
+    for h in saved_handlers:
+        if h not in root.handlers:
+            root.addHandler(h)
+    root.setLevel(saved_level)
 
 
 def test_setup_logging_creates_rotating_handler(tmp_path, monkeypatch):
@@ -29,3 +46,16 @@ def test_log_uncaught_records_and_chains(monkeypatch, caplog):
         except ValueError:
             app._log_uncaught(*sys.exc_info())
     assert called and "boom" in caplog.text and "처리되지 않은 예외" in caplog.text
+
+
+def test_previous_test_did_not_leak_handlers():
+    root = logging.getLogger()
+    assert not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers)
+
+
+def test_log_uncaught_skips_keyboard_interrupt(monkeypatch, caplog):
+    called = []
+    monkeypatch.setattr(sys, "__excepthook__", lambda *a: called.append(a))
+    with caplog.at_level(logging.CRITICAL, logger="stampcut"):
+        app._log_uncaught(KeyboardInterrupt, KeyboardInterrupt(), None)
+    assert called and "처리되지 않은 예외" not in caplog.text
