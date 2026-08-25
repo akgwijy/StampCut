@@ -4,7 +4,7 @@ from stampcut.core.renderer import LAYOUT, compute_square_geometry, _even
 def test_layout_constants_match_spec():
     assert (LAYOUT["canvas_w"], LAYOUT["canvas_h"], LAYOUT["square"], LAYOUT["square_y"]) == (1080, 1920, 1080, 420)
     assert (LAYOUT["title_font"], LAYOUT["time_font"], LAYOUT["caption_font"]) == (64, 36, 60)
-    assert (LAYOUT["time_y"], LAYOUT["caption_y"], LAYOUT["caption_border"]) == (1510, 1560, 4)
+    assert (LAYOUT["time_y"], LAYOUT["caption_y"], LAYOUT["caption_border"]) == (1510, 1552, 4)
     assert LAYOUT["time_color"] == "#FFD60A" and LAYOUT["fps"] == 30
 
 

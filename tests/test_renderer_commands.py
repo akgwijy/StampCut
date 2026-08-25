@@ -40,7 +40,7 @@ def test_basic_command(tmp_path, make_video, make_clip):
     assert "[bg][sq]overlay=0:420[c0]" in fc
     assert fc.count("drawtext=") == 3
     assert "fontsize=64" in fc and "fontsize=36" in fc and "fontsize=60" in fc
-    assert "fontcolor=0xFFD60A" in fc and "y=1510" in fc and "y=1560" in fc and "borderw=4" in fc
+    assert "fontcolor=0xFFD60A" in fc and "y=1510" in fc and "y=1552" in fc and "borderw=4" in fc
     assert "[0:a]afade=t=in:d=0.2,afade=t=out:st=17.80:d=0.2[a]" in fc
     assert "anullsrc" not in " ".join(cmd)
     assert cmd[cmd.index("-t") + 1] == "18"
