@@ -96,7 +96,8 @@ class PreviewWidget(QWidget):
         self._loaded_path: Path | None = None
 
         L = LAYOUT
-        self.scene = QGraphicsScene(0, 0, L["canvas_w"], L["canvas_h"])
+        self._shut_down = False
+        self.scene = QGraphicsScene(0, 0, L["canvas_w"], L["canvas_h"], self)
         self.bg_item = self.scene.addRect(QRectF(0, 0, L["canvas_w"], L["canvas_h"]), QPen(Qt.NoPen), QBrush(QColor(settings.background_color)))
         self.square = QGraphicsRectItem(0, 0, _S, _S)
         self.square.setPen(QPen(Qt.NoPen))
@@ -193,6 +194,20 @@ class PreviewWidget(QWidget):
         self.bg_item.setBrush(brush)
         self.square.setBrush(brush)
 
+    # --- 종료 ---
+    def shutdown(self) -> None:
+        """플레이어를 씬/비디오 아이템보다 먼저 정리한다 (테스트 종료 시 access violation 방지). 여러 번 호출해도 안전하다."""
+        if self._shut_down:
+            return
+        self._shut_down = True
+        self.player.stop()
+        self.player.setVideoOutput(None)
+        self.player.setSource(QUrl())
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        super().closeEvent(event)
+
     # --- 외부 API ---
     def set_settings(self, settings: Settings) -> None:
         self.settings = settings
@@ -218,6 +233,8 @@ class PreviewWidget(QWidget):
         self.refresh_media()
 
     def refresh_media(self) -> None:
+        if self._shut_down:
+            return
         clip = self.clip
         if clip is None or clip.preview_path is None or not clip.preview_path.exists():
             return

@@ -66,3 +66,13 @@ def test_zoom_snaps_to_five_hundredths(qtbot, make_video, make_clip):
         w.zoom_slider.setValue(203)
     assert w.zoom_slider.value() == 205 and abs(clip.zoom - 2.05) < 1e-9
     assert w.zoom_slider.singleStep() == 5
+
+
+def test_shutdown_is_idempotent_and_detaches(qtbot, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.set_clip(make_clip(make_video(), t=758))
+    w.shutdown()
+    w.shutdown()
+    assert w.player.videoOutput() is None
+    w.close()  # closeEvent → shutdown again, must not raise

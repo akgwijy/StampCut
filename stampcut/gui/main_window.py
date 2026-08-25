@@ -353,5 +353,5 @@ class MainWindow(QMainWindow):
             self._bridge.blockSignals(True)
             for w in active:  # 시간 안에 안 끝난 워커가 뒤늦게 시그널로 죽은 위젯을 건드리지 않도록
                 w.signals.blockSignals(True)
-        self.preview.player.stop()
+        self.preview.shutdown()
         event.accept()
