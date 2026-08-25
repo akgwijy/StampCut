@@ -1,4 +1,7 @@
-"""분석 → 미리보기 → 렌더. GUI는 이 함수들을 워커 스레드에서 호출한다."""
+"""분석 → 미리보기 → 렌더. GUI는 이 함수들을 워커 스레드에서 호출한다.
+
+fetch_previews의 on_clip은 여러 워커 스레드에서 동시에 호출되므로 GUI는 시그널로 마샬링해야 한다.
+"""
 from __future__ import annotations
 
 import logging
@@ -58,6 +61,7 @@ def analyze(
             mentions.extend(extract_mentions(v, c))
     clips = build_clips(mentions, videos, s)
     log.info("analyze: %d videos, %d mentions, %d clips", len(videos), len(mentions), len(clips))
+    progress("analyze", total, total, f"후보 {len(clips)}개")
     return Project(urls=list(urls), title=title.strip() or default_title(videos, s), videos=videos, clips=clips)
 
 
@@ -100,6 +104,10 @@ def fetch_previews(
             progress("preview", done, n, f"미리보기용 구간 받는 중 {done} / {n}")
 
 
+def _label(c: Clip) -> str:
+    return f"{c.video.short_name} {format_time(c.t)}"
+
+
 def render(
     project: Project,
     s: Settings,
@@ -113,6 +121,7 @@ def render(
     clips = project.enabled_clips()
     if not clips:
         raise ValueError("켜진 클립이 없습니다")
+    _check(cancel)
     job = render_dir() / uuid.uuid4().hex
     job.mkdir(parents=True, exist_ok=True)
     font = resolve_font(s)
@@ -121,11 +130,12 @@ def render(
     kept: list[Clip] = []
     for i, c in enumerate(clips):
         _check(cancel)
-        label = f"{c.video.short_name} {format_time(c.t)}"
+        label = _label(c)
         progress("download", i, n, f"{label} 고화질 받는 중")
         try:
             downloader.download_final(c, s, cancel=cancel)
             kept.append(c)
+            progress("download", i + 1, n, f"{label} 받기 완료")
         except DownloadCancelled:
             raise ff.Cancelled()
         except DownloadFailed as e:
@@ -139,7 +149,7 @@ def render(
     total_units = len(kept) * 100
     for i, c in enumerate(kept):
         _check(cancel)
-        label = f"{c.video.short_name} {format_time(c.t)}"
+        label = _label(c)
         progress("render", i * 100, total_units, f"{label} 렌더링 중")
         info = ff.probe(paths, c.final_path)
         cmd, out = build_clip_command(paths, c, s, project.title, info, job, i, font)

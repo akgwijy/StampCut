@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from stampcut.core import pipeline
-from stampcut.core.downloader import DownloadFailed
+from stampcut.core.downloader import DownloadCancelled, DownloadFailed
 from stampcut.core.ffmpeg import Cancelled, FfmpegPaths, ProbeInfo
 from stampcut.core.models import ClipStatus, Project, RawComment, Settings
 
@@ -21,8 +21,8 @@ class FakeClient:
 
 
 class FakeDownloader:
-    def __init__(self, root, fail_ids=()):
-        self.root, self.fail_ids, self.calls = root, set(fail_ids), []
+    def __init__(self, root, fail_ids=(), cancel_ids=()):
+        self.root, self.fail_ids, self.cancel_ids, self.calls = root, set(fail_ids), set(cancel_ids), []
 
     def download_preview(self, clip, s, on_progress=None, cancel=None):
         self.calls.append(("preview", clip.t))
@@ -35,6 +35,8 @@ class FakeDownloader:
 
     def download_final(self, clip, s, on_progress=None, cancel=None):
         self.calls.append(("final", clip.t))
+        if clip.id in self.cancel_ids:
+            raise DownloadCancelled()
         if clip.id in self.fail_ids:
             raise DownloadFailed("nope")
         clip.final_path = self.root / f"f{clip.t}.mp4"
@@ -52,7 +54,7 @@ def test_analyze_builds_project_and_default_title(make_video):
     p = pipeline.analyze([v.url], "", Settings(), client, progress=lambda *a: calls.append(a))
     assert p.title == "26.08.20 문성FC 하이라이트"
     assert [(c.t, c.caption) for c in p.clips] == [(425, "기훈 선방"), (758, "원더골")]
-    assert calls[0][0] == "analyze" and calls[-1][1] == 1
+    assert calls[0][0] == "analyze" and calls[-1][1] == calls[-1][2] == 2
 
 
 def test_analyze_keeps_given_title_and_cancel(make_video):
@@ -86,6 +88,16 @@ def test_fetch_previews_skips_already_covered(tmp_path, make_video, make_clip):
     assert dl.calls == [("preview", 100)]
 
 
+def test_fetch_previews_respects_preset_cancel(tmp_path, make_video, make_clip):
+    v = make_video()
+    a = make_clip(v, 100)
+    dl = FakeDownloader(tmp_path)
+    cancel = threading.Event()
+    cancel.set()
+    pipeline.fetch_previews(Project([v.url], "t", [v], [a]), Settings(), dl, on_clip=lambda c: None, cancel=cancel)
+    assert dl.calls == [] and a.status is ClipStatus.PENDING
+
+
 @pytest.fixture
 def fake_ffmpeg(monkeypatch, tmp_path):
     runs = []
@@ -107,6 +119,26 @@ def _paths(tmp_path):
     return FfmpegPaths(tmp_path / "ffmpeg.exe", tmp_path / "ffprobe.exe")
 
 
+def test_render_preset_cancel_raises_before_any_work(tmp_path, make_video, make_clip, monkeypatch):
+    monkeypatch.setattr(pipeline, "render_dir", lambda: tmp_path / "render")
+    v = make_video()
+    dl = FakeDownloader(tmp_path)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Cancelled):
+        pipeline.render(Project([v.url], "t", [v], [make_clip(v, 100)]), Settings(), tmp_path / "o.mp4", dl, _paths(tmp_path), cancel=cancel)
+    assert dl.calls == [] and not (tmp_path / "render").exists()
+
+
+def test_render_download_cancelled_becomes_cancelled(fake_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    c = make_clip(v, 100)
+    dl = FakeDownloader(tmp_path, cancel_ids={c.id})
+    with pytest.raises(Cancelled):
+        pipeline.render(Project([v.url], "t", [v], [c]), Settings(), tmp_path / "o.mp4", dl, _paths(tmp_path))
+    assert fake_ffmpeg == []
+
+
 def test_render_flow(fake_ffmpeg, tmp_path, make_video, make_clip):
     v = make_video()
     a, b, c = make_clip(v, 100), make_clip(v, 500, enabled=False), make_clip(v, 900)
@@ -121,6 +153,7 @@ def test_render_flow(fake_ffmpeg, tmp_path, make_video, make_clip):
     assert not any((tmp_path / "render").iterdir())
     stages = [x[0] for x in prog]
     assert stages[0] == "download" and "render" in stages and prog[-1][:2] == ("concat", 1)
+    assert any(x[0] == "download" and x[1] == 2 and x[2] == 2 for x in prog)
 
 
 def test_render_skips_failed_clip_when_allowed(fake_ffmpeg, tmp_path, make_video, make_clip):
@@ -140,6 +173,7 @@ def test_render_raises_when_failure_not_allowed(fake_ffmpeg, tmp_path, make_vide
     dl = FakeDownloader(tmp_path, fail_ids={c.id})
     with pytest.raises(DownloadFailed):
         pipeline.render(Project([v.url], "제목", [v], [c]), Settings(), tmp_path / "o.mp4", dl, _paths(tmp_path))
+    assert any((tmp_path / "render").iterdir())
 
 
 def test_render_without_enabled_clips(tmp_path, make_video, make_clip):
