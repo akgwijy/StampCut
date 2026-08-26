@@ -123,6 +123,18 @@ def test_set_settings_syncs_style_controls(qtbot):
     assert w.caption_item.brush().color().name() == "#654321"
 
 
+def test_controls_panel_is_detachable(qtbot):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    # 편집 컨트롤은 부모 없는 controls_panel 안에 (MainWindow가 왼쪽 열로 가져감)
+    assert w.controls_panel.parent() is None
+    for widget in (w.zoom_slider, w.pre_spin, w.post_spin, w.caption_edit, w.title_y_spin, w.caption_y_spin, w.reset_btn):
+        assert widget.parent() is w.controls_panel or widget.parentWidget() is w.controls_panel
+    # 영상 뷰·재생 컨트롤은 PreviewWidget 자신에
+    assert w.view.parentWidget() is w
+    assert w.play_btn.parentWidget() is w and w.pos_label.parentWidget() is w
+
+
 def _mouse(type_, pos):
     p = QPointF(pos)
     return QMouseEvent(type_, p, p, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)

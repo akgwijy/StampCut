@@ -165,11 +165,8 @@ class PreviewWidget(QWidget):
         self.reset_btn = QPushButton("기본값으로")
         self.reset_btn.clicked.connect(self._reset)
 
-        controls = QFormLayout()
-        row = QHBoxLayout()
-        row.addWidget(self.play_btn)
-        row.addWidget(self.pos_label)
-        controls.addRow(row)
+        self.controls_panel = QWidget()
+        controls = QFormLayout(self.controls_panel)
         zrow = QHBoxLayout()
         zrow.addWidget(self.zoom_slider)
         zrow.addWidget(self.zoom_label)
@@ -193,12 +190,13 @@ class PreviewWidget(QWidget):
         controls.addRow("자막", crow)
         controls.addRow(self.reset_btn)
 
-        layout = QHBoxLayout(self)
-        layout.addWidget(self.view, 3)
-        side = QVBoxLayout()
-        side.addLayout(controls)
-        side.addStretch(1)
-        layout.addLayout(side, 2)
+        self.transport = QHBoxLayout()
+        self.transport.addWidget(self.play_btn)
+        self.transport.addWidget(self.pos_label)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.view, 1)
+        layout.addLayout(self.transport)
         self._set_controls_enabled(False)
 
     # --- 구성 ---
