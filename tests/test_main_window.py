@@ -176,6 +176,34 @@ def test_render_refuses_zero_length_clip(qtbot, monkeypatch, tmp_path, make_vide
     assert warned and "0초" in warned[0] and rendered == []
 
 
+def test_left_column_layout_and_full_width_table(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QHeaderView
+    from stampcut.gui.clip_table import COL_CAPTION
+
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    left = w.url_panel.parentWidget()
+    assert w.table.parentWidget() is left  # URL과 표가 같은 왼쪽 열에
+    assert left.minimumWidth() == 420
+    assert w.preview.controls_panel.window() is w  # 세부 설정이 메인 창 안에 배치됨
+    assert w.preview.parentWidget() is not left  # 미리보기는 오른쪽
+    header = w.table.horizontalHeader()
+    for col in range(w.model.columnCount()):
+        expected = QHeaderView.Stretch if col == COL_CAPTION else QHeaderView.ResizeToContents
+        assert header.sectionResizeMode(col) == expected
+    assert w.table.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+
+
+def test_busy_locks_detached_controls_panel(qtbot):
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w._set_busy(True)
+    assert not w.preview.controls_panel.isEnabled()
+    w._set_busy(False)
+    assert w.preview.controls_panel.isEnabled()
+
+
 def test_style_change_saves_settings(qtbot, monkeypatch):
     saved = []
     monkeypatch.setattr(main_window.settings_mod, "save", lambda s, path=None: saved.append(s))

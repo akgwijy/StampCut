@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Qt, QThreadPool, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QGroupBox,
     QHeaderView,
     QMainWindow,
     QMessageBox,
@@ -90,7 +91,10 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setItemDelegateForColumn(COL_PRE, SecondsDelegate(self.table))
         self.table.setItemDelegateForColumn(COL_POST, SecondsDelegate(self.table))
-        self.table.horizontalHeader().setSectionResizeMode(COL_CAPTION, QHeaderView.Stretch)
+        header = self.table.horizontalHeader()
+        for col in range(self.model.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.Stretch if col == COL_CAPTION else QHeaderView.ResizeToContents)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.verticalHeader().setVisible(False)
         self.table.selectionModel().currentRowChanged.connect(self._on_row_selected)
         retry = QAction("미리보기 다시 받기", self.table)
@@ -112,14 +116,23 @@ class MainWindow(QMainWindow):
         elif not self.settings.api_key:
             self.status_panel.set_idle("⚙ 설정에서 YouTube API 키를 먼저 입력하세요")
 
+        left = QWidget()
+        left.setMinimumWidth(420)
+        left_layout = QVBoxLayout(left)
+        left_layout.addWidget(self.url_panel)
+        style_box = QGroupBox("세부 설정")
+        QVBoxLayout(style_box).addWidget(self.preview.controls_panel)
+        left_layout.addWidget(style_box)
+        left_layout.addWidget(self.table, 1)
+
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.table)
+        splitter.addWidget(left)
         splitter.addWidget(self.preview)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([460, 820])
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(self.url_panel)
         layout.addWidget(splitter, 1)
         layout.addWidget(self.status_panel)
         self.setCentralWidget(central)
@@ -338,6 +351,7 @@ class MainWindow(QMainWindow):
         self.status_panel.set_busy(busy)
         self.table.setEnabled(not busy)
         self.preview.setEnabled(not busy)
+        self.preview.controls_panel.setEnabled(not busy)
         self.settings_action.setEnabled(not busy)
 
     def _warn(self, text: str) -> None:
