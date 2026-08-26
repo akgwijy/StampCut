@@ -25,3 +25,13 @@ def test_analyze_signal_title_and_busy(qtbot):
     assert not p.analyze_btn.isEnabled() and p.urls_edit.isReadOnly()
     p.set_busy(False)
     assert p.analyze_btn.isEnabled() and not p.urls_edit.isReadOnly()
+
+
+def test_vertical_stacking(qtbot):
+    w = UrlPanel()
+    qtbot.addWidget(w)
+    w.layout().activate()
+    # URL 입력이 위, 타이틀이 아래, 분석 버튼은 타이틀 오른쪽
+    assert w.urls_edit.geometry().bottom() < w.title_edit.geometry().top()
+    assert w.analyze_btn.geometry().left() > w.title_edit.geometry().left()
+    assert abs(w.analyze_btn.geometry().center().y() - w.title_edit.geometry().center().y()) < 20

@@ -1,9 +1,9 @@
 """URL 목록 + 타이틀 입력 + 분석 버튼."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor, QTextCursor, QTextFormat
-from PySide6.QtWidgets import QGridLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTextEdit, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 from stampcut.core.youtube_api import parse_video_id
 
@@ -23,14 +23,14 @@ class UrlPanel(QWidget):
         self.analyze_btn.setDefault(True)
         self.analyze_btn.clicked.connect(self.analyze_requested)
 
-        layout = QGridLayout(self)
-        layout.addWidget(QLabel("유튜브 URL (한 줄에 하나)"), 0, 0)
-        layout.addWidget(QLabel("타이틀 (상단 띠)"), 0, 1)
-        layout.addWidget(self.urls_edit, 1, 0, 2, 1)
-        layout.addWidget(self.title_edit, 1, 1)
-        layout.addWidget(self.analyze_btn, 2, 1, alignment=Qt.AlignRight | Qt.AlignBottom)
-        layout.setColumnStretch(0, 3)
-        layout.setColumnStretch(1, 2)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("유튜브 URL (한 줄에 하나)"))
+        layout.addWidget(self.urls_edit)
+        layout.addWidget(QLabel("타이틀 (상단 띠)"))
+        trow = QHBoxLayout()
+        trow.addWidget(self.title_edit, 1)
+        trow.addWidget(self.analyze_btn)
+        layout.addLayout(trow)
 
     def _lines(self) -> list[str]:
         return self.urls_edit.toPlainText().splitlines()
