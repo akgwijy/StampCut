@@ -28,7 +28,7 @@ from stampcut.core.ffmpeg import find_ffmpeg
 from stampcut.core.models import Clip, ClipStatus, Project, Settings
 from stampcut.core.renderer import unique_output_path
 from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
-from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, ClipTableModel, SecondsDelegate
+from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME, ClipTableModel, SecondsDelegate
 from stampcut.gui.preview_widget import PreviewWidget, load_font_family
 from stampcut.gui.settings_dialog import SettingsDialog
 from stampcut.gui.status_bar import StatusPanel
@@ -94,6 +94,9 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         for col in range(self.model.columnCount()):
             header.setSectionResizeMode(col, QHeaderView.Stretch if col == COL_CAPTION else QHeaderView.ResizeToContents)
+        for col, width in ((COL_TIME, 76), (COL_PRE, 64), (COL_POST, 64)):  # 스핀박스 편집이 가능한 고정 폭
+            header.setSectionResizeMode(col, QHeaderView.Fixed)
+            header.resizeSection(col, width)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.verticalHeader().setVisible(False)
         self.table.selectionModel().currentRowChanged.connect(self._on_row_selected)
