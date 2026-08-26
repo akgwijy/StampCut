@@ -7,3 +7,4 @@ dist/
 *.spec
 .pytest_cache/
 .coverage
+*.egg-info/

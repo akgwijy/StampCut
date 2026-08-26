@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stampcut"
+version = "0.1.0"
+description = "유튜브 댓글 타임스탬프로 릴스/쇼츠용 하이라이트 영상 자동 편집"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6>=6.7",
+  "yt-dlp>=2025.1.1",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-qt>=4.4", "responses>=0.25"]
+
+[project.scripts]
+stampcut = "stampcut.app:main"
+
+[tool.setuptools.packages.find]
+include = ["stampcut*"]
+
+[tool.setuptools.package-data]
+stampcut = ["assets/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: 실제 네트워크와 ffmpeg가 필요한 통합 테스트 (기본 제외)"]
+addopts = "-m 'not network'"
+qt_api = "pyside6"
