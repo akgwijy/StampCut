@@ -52,6 +52,12 @@ def load_font_family(font_path: Path) -> str:
     return families[0] if families else "Malgun Gothic"
 
 
+def seek_target(pos_ms: int, delta_s: int, start_ms: int, end_ms: int) -> int:
+    """구간 안에서 delta_s초 이동한 목표 위치(ms). 끝 200ms 앞에서 멈춰 즉시 루프-백을 피한다."""
+    hi = max(start_ms, end_ms - 200)
+    return min(hi, max(start_ms, pos_ms + delta_s * 1000))
+
+
 class _DragView(QGraphicsView):
     def __init__(self, scene: QGraphicsScene, on_drag, hit_test=None, on_text_drag=None, on_drag_end=None) -> None:
         super().__init__(scene)
@@ -137,6 +143,17 @@ class PreviewWidget(QWidget):
         self.play_btn = QPushButton("▶ 재생")
         self.play_btn.clicked.connect(self._toggle_play)
         self.pos_label = QLabel("0:00 / 0:00")
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.valueChanged.connect(self._on_seek)
+        self.back5_btn = QPushButton("-5초")
+        self.back5_btn.clicked.connect(lambda: self._seek_by(-5))
+        self.back1_btn = QPushButton("-1초")
+        self.back1_btn.clicked.connect(lambda: self._seek_by(-1))
+        self.fwd1_btn = QPushButton("+1초")
+        self.fwd1_btn.clicked.connect(lambda: self._seek_by(1))
+        self.fwd5_btn = QPushButton("+5초")
+        self.fwd5_btn.clicked.connect(lambda: self._seek_by(5))
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setRange(int(ZOOM_MIN * 100), int(ZOOM_MAX * 100))
         self.zoom_slider.setSingleStep(5)
@@ -192,6 +209,11 @@ class PreviewWidget(QWidget):
 
         self.transport = QHBoxLayout()
         self.transport.addWidget(self.play_btn)
+        self.transport.addWidget(self.back5_btn)
+        self.transport.addWidget(self.back1_btn)
+        self.transport.addWidget(self.seek_slider, 1)
+        self.transport.addWidget(self.fwd1_btn)
+        self.transport.addWidget(self.fwd5_btn)
         self.transport.addWidget(self.pos_label)
 
         layout = QVBoxLayout(self)
@@ -232,7 +254,8 @@ class PreviewWidget(QWidget):
         btn.setStyleSheet(f"background-color: {color}; border: 1px solid #888888;")
 
     def _set_controls_enabled(self, on: bool) -> None:
-        for w in (self.play_btn, self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit, self.reset_btn):
+        for w in (self.play_btn, self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit, self.reset_btn,
+                  self.seek_slider, self.back5_btn, self.back1_btn, self.fwd1_btn, self.fwd5_btn):
             w.setEnabled(on)
 
     def _apply_background(self) -> None:
@@ -284,6 +307,7 @@ class PreviewWidget(QWidget):
             self._loaded_path = None
             self.player.setSource(QUrl())
             self.relayout()
+            self._update_seek_range()
             return
         self.video_item.setVisible(True)
         self.sync_from_clip()
@@ -298,6 +322,7 @@ class PreviewWidget(QWidget):
         if self._loaded_path != clip.preview_path:
             self._loaded_path = clip.preview_path
             self.player.setSource(QUrl.fromLocalFile(str(clip.preview_path)))
+        self._update_seek_range()
         self.player.setPosition(self._window_ms()[0])
         self.player.play()
         self.play_btn.setText("⏸ 일시정지")
@@ -346,6 +371,7 @@ class PreviewWidget(QWidget):
         for w in (self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit):
             w.blockSignals(False)
         self.relayout()
+        self._update_seek_range()
 
     # --- 재생 ---
     def _window_ms(self) -> tuple[int, int]:
@@ -355,11 +381,30 @@ class PreviewWidget(QWidget):
         s = self.settings
         return (clip.start(s) - clip.preview_start) * 1000, (clip.end(s) - clip.preview_start) * 1000
 
+    def _update_seek_range(self) -> None:
+        start, end = self._window_ms()
+        self.seek_slider.blockSignals(True)
+        self.seek_slider.setRange(0, max(0, end - start))
+        self.seek_slider.blockSignals(False)
+
+    def _on_seek(self, value: int) -> None:
+        start, end = self._window_ms()
+        if end:
+            self.player.setPosition(start + value)
+
+    def _seek_by(self, delta_s: int) -> None:
+        start, end = self._window_ms()
+        if end:
+            self.player.setPosition(seek_target(self.player.position(), delta_s, start, end))
+
     def _on_position(self, ms: int) -> None:
         start, end = self._window_ms()
         if end and (ms >= end or ms < start - 500):
             self.player.setPosition(start)
             return
+        self.seek_slider.blockSignals(True)
+        self.seek_slider.setValue(min(max(0, ms - start), max(0, end - start)))
+        self.seek_slider.blockSignals(False)
         self.pos_label.setText(f"{format_time(max(0, ms - start) // 1000)} / {format_time(max(0, end - start) // 1000)}")
 
     def _toggle_play(self) -> None:
@@ -428,12 +473,14 @@ class PreviewWidget(QWidget):
         if self.clip is None:
             return
         self.clip.pre = value
+        self._update_seek_range()
         self._emit()
 
     def _on_post(self, value: int) -> None:
         if self.clip is None:
             return
         self.clip.post = value
+        self._update_seek_range()
         self._emit()
 
     def _on_caption(self, text: str) -> None:

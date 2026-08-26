@@ -4,7 +4,7 @@ from PySide6.QtWidgets import QGraphicsScene
 
 from stampcut.core.models import Settings
 from stampcut.core.renderer import compute_square_geometry
-from stampcut.gui.preview_widget import PreviewWidget, _DragView, pan_after_drag, video_item_placement
+from stampcut.gui.preview_widget import PreviewWidget, _DragView, pan_after_drag, seek_target, video_item_placement
 
 
 def test_pan_after_drag_zoom_in_moves_video_with_cursor():
@@ -186,3 +186,53 @@ def test_text_drag_updates_settings_and_emits_on_release(qtbot):
         w._on_text_drag_end()
     w._on_text_drag("caption", -100000.0)
     assert s.caption_y == 0  # 클램프
+
+
+def test_seek_target_clamps_to_window():
+    assert seek_target(5000, 5, 0, 18000) == 10000
+    assert seek_target(1000, -5, 0, 18000) == 0
+    assert seek_target(17500, 5, 0, 18000) == 17800  # 끝 200ms 앞에서 멈춤
+    assert seek_target(60000, -5, 55000, 73000) == 55000
+    assert seek_target(0, -1, 0, 0) == 0  # 빈 구간
+
+
+def test_seek_controls_disabled_without_clip(qtbot):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    for widget in (w.seek_slider, w.back5_btn, w.back1_btn, w.fwd1_btn, w.fwd5_btn):
+        assert not widget.isEnabled()
+
+
+def test_seek_slider_and_buttons_drive_player(qtbot, monkeypatch, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    clip = make_clip(make_video(), t=758)
+    clip.preview_start = 700  # 구간: (755-700)s..(773-700)s → 55000..73000ms, 길이 18000
+    w.set_clip(clip)
+    assert w.seek_slider.maximum() == 18000
+    assert w.seek_slider.isEnabled()
+    calls = []
+    monkeypatch.setattr(w.player, "setPosition", lambda v: calls.append(v))
+    w.seek_slider.setValue(3000)  # 사용자 조작 → 구간 시작 + 3초
+    assert calls[-1] == 58000
+    monkeypatch.setattr(w.player, "position", lambda: 60000)
+    w._seek_by(5)
+    assert calls[-1] == 65000
+    w._seek_by(-5)
+    assert calls[-1] == 55000  # 시작 클램프
+    w.pre_spin.setValue(5)  # 앞 5초 → 구간 53000..73000, 길이 20000
+    assert w.seek_slider.maximum() == 20000
+
+
+def test_on_position_syncs_slider_without_feedback(qtbot, monkeypatch, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    clip = make_clip(make_video(), t=758)
+    clip.preview_start = 700
+    w.set_clip(clip)
+    calls = []
+    monkeypatch.setattr(w.player, "setPosition", lambda v: calls.append(v))
+    w._on_position(58000)  # 재생 위치 갱신 → 슬라이더만 움직이고 시크(되먹임)는 없어야 함
+    assert w.seek_slider.value() == 3000
+    assert calls == []
+    assert w.pos_label.text() == "0:03 / 0:18"
