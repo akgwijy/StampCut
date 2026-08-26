@@ -247,3 +247,28 @@ def test_set_settings_refreshes_seek_range(qtbot, make_video, make_clip):
     assert w.seek_slider.maximum() == 18000
     w.set_settings(Settings(pre_seconds=5))  # 전역 앞 5초 → 구간 53000..73000
     assert w.seek_slider.maximum() == 20000
+
+
+def test_seek_slider_steps_are_in_seconds(qtbot):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    assert w.seek_slider.singleStep() == 1000
+    assert w.seek_slider.pageStep() == 5000
+
+
+def test_on_position_leaves_slider_alone_while_user_drags(qtbot, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    clip = make_clip(make_video(), t=758)
+    clip.preview_start = 700
+    w.set_clip(clip)
+    w.seek_slider.setSliderDown(True)  # 사용자가 핸들을 잡고 있는 상태
+    w.seek_slider.blockSignals(True)
+    w.seek_slider.setValue(5000)
+    w.seek_slider.blockSignals(False)
+    w._on_position(58000)  # 재생 틱이 와도 핸들을 빼앗지 않는다
+    assert w.seek_slider.value() == 5000
+    assert w.pos_label.text() == "0:03 / 0:18"  # 라벨은 계속 갱신
+    w.seek_slider.setSliderDown(False)
+    w._on_position(58000)
+    assert w.seek_slider.value() == 3000

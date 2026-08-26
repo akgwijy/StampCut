@@ -145,6 +145,8 @@ class PreviewWidget(QWidget):
         self.pos_label = QLabel("0:00 / 0:00")
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
+        self.seek_slider.setSingleStep(1000)
+        self.seek_slider.setPageStep(5000)
         self.seek_slider.valueChanged.connect(self._on_seek)
         self.back5_btn = QPushButton("-5초")
         self.back5_btn.clicked.connect(lambda: self._seek_by(-5))
@@ -403,9 +405,10 @@ class PreviewWidget(QWidget):
         if end and (ms >= end or ms < start - 500):
             self.player.setPosition(start)
             return
-        self.seek_slider.blockSignals(True)
-        self.seek_slider.setValue(min(max(0, ms - start), max(0, end - start)))
-        self.seek_slider.blockSignals(False)
+        if not self.seek_slider.isSliderDown():
+            self.seek_slider.blockSignals(True)
+            self.seek_slider.setValue(min(max(0, ms - start), max(0, end - start)))
+            self.seek_slider.blockSignals(False)
         self.pos_label.setText(f"{format_time(max(0, ms - start) // 1000)} / {format_time(max(0, end - start) // 1000)}")
 
     def _toggle_play(self) -> None:
