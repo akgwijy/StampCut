@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QSpinBox, QStyledItemDelegate
+from PySide6.QtWidgets import QAbstractSpinBox, QSpinBox, QStyledItemDelegate
 
 from stampcut.core.models import Clip, ClipStatus, Settings
 from stampcut.core.timestamps import format_time
@@ -138,6 +138,7 @@ class SecondsDelegate(QStyledItemDelegate):
         sb = QSpinBox(parent)
         sb.setRange(0, 120)
         sb.setSuffix("초")
+        sb.setButtonSymbols(QAbstractSpinBox.NoButtons)  # 칸이 좁아 화살표 대신 직접 타이핑
         return sb
 
     def setEditorData(self, editor, index):

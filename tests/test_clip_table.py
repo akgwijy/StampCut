@@ -69,3 +69,16 @@ def test_invalid_index_is_ignored(qtbot, make_video, make_clip):
     m.set_clips([make_clip(make_video(), t=758)])
     assert m.data(QModelIndex()) is None
     assert m.setData(QModelIndex(), 5, Qt.EditRole) is False
+
+
+def test_seconds_delegate_has_no_arrow_buttons(qtbot):
+    from PySide6.QtWidgets import QAbstractSpinBox, QWidget
+
+    from stampcut.gui.clip_table import SecondsDelegate
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    editor = SecondsDelegate().createEditor(parent, None, None)
+    assert editor.buttonSymbols() == QAbstractSpinBox.NoButtons  # 화살표 없이 직접 타이핑
+    assert (editor.minimum(), editor.maximum()) == (0, 120)
+    assert editor.suffix() == "초"
