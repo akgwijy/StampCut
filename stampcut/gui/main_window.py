@@ -5,7 +5,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThreadPool, Signal
+from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from stampcut import __version__
 from stampcut.core import pipeline
+from stampcut.core import project_io
 from stampcut.core import settings as settings_mod
 from stampcut.core.downloader import Downloader, preview_covers
 from stampcut.core.ffmpeg import find_ffmpeg
@@ -60,9 +61,10 @@ class MainWindow(QMainWindow):
     analysis_done = Signal()
     render_done = Signal(object)
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, project_file: Path | None = None) -> None:
         super().__init__()
         self.settings = settings if settings is not None else settings_mod.load()
+        self.project_file = project_file
         self.project: Project | None = None
         self.pool = QThreadPool.globalInstance()
         self._workers: list[Worker] = []
@@ -70,6 +72,10 @@ class MainWindow(QMainWindow):
         self._render_candidates: set[str] = set()
         self._bridge = _ClipBridge()
         self._bridge.updated.connect(self._on_clip_updated)
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(1500)
+        self._autosave_timer.timeout.connect(self._flush_autosave)
         self._rebuild_tools()
 
         self.setWindowTitle(f"StampCut {__version__}")
@@ -140,6 +146,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_panel)
         self.setCentralWidget(central)
 
+        if self.project_file is not None:
+            restored = project_io.load(self.project_file)
+            if restored is not None:
+                self._adopt_project(restored, restored=True)
+
     # --- 설정 ---
     def _rebuild_tools(self) -> None:
         # PyInstaller로 묶였을 때는 실행 파일 옆 bin\ffmpeg.exe를 먼저 찾는다 (스펙 §4 순서 ①).
@@ -186,24 +197,33 @@ class MainWindow(QMainWindow):
         self._start(w)
 
     def _on_analyzed(self, project: Project) -> None:
-        self.project = project
-        self.url_panel.set_title(project.title)
-        self.model.set_clips(project.clips)
-        self.preview.set_title(project.title)
-        self.status_panel.update_summary(project, self.settings)
+        self._adopt_project(project)
         self._set_busy(False)
         if not project.clips:
             self.status_panel.set_idle("타임스탬프가 적힌 댓글이 없습니다")
             self._info("타임스탬프가 적힌 댓글이 없습니다.")
-        else:
-            self.table.selectRow(0)
-            if self.ffpaths is None:
-                self.status_panel.set_idle(FFMPEG_MISSING)
-            else:
-                self.start_previews(project.clips)
+        elif self.ffpaths is None:
+            self.status_panel.set_idle(FFMPEG_MISSING)
         if project.warnings:
             self._info("\n".join(project.warnings))
         self.analysis_done.emit()
+
+    def _adopt_project(self, project: Project, restored: bool = False) -> None:
+        """분석 결과 채택과 저장 파일 복원이 공유하는 공통 경로."""
+        self.project = project
+        if restored:
+            self.url_panel.urls_edit.setPlainText("\n".join(project.urls))
+        self.url_panel.set_title(project.title)
+        self.model.set_clips(project.clips)
+        self.preview.set_title(project.title)
+        self.status_panel.update_summary(project, self.settings)
+        if project.clips:
+            self.table.selectRow(0)
+            if self.ffpaths is not None:
+                self.start_previews(project.clips)
+        if restored:
+            self.status_panel.set_idle(FFMPEG_MISSING if self.ffpaths is None else "이전 작업을 불러왔습니다 — 이어서 편집하세요")
+        self._schedule_autosave()
 
     def _on_analyze_failed(self, msg: str) -> None:
         self._set_busy(False)
@@ -232,6 +252,7 @@ class MainWindow(QMainWindow):
         self.model.refresh_row(clip)
         if self.preview.clip is clip and clip.status is ClipStatus.READY:
             self.preview.refresh_media()
+        self._schedule_autosave()
 
     def _retry_preview(self) -> None:
         clip = self._selected_clip()
@@ -254,17 +275,20 @@ class MainWindow(QMainWindow):
         self.status_panel.update_summary(self.project, self.settings)
         if self.project and clip.status is ClipStatus.READY and not preview_covers(clip, self.settings):
             self.start_previews([clip])
+        self._schedule_autosave()
 
     def _on_table_changed(self) -> None:
         self.status_panel.update_summary(self.project, self.settings)
         clip = self._selected_clip()
         if clip is not None and self.preview.clip is clip:
             self.preview.sync_from_clip()
+        self._schedule_autosave()
 
     def _on_title_changed(self, text: str) -> None:
         if self.project:
             self.project.title = text
         self.preview.set_title(text)
+        self._schedule_autosave()
 
     def _on_output_dir_changed(self, d: str) -> None:
         self.settings.output_dir = d
@@ -322,6 +346,7 @@ class MainWindow(QMainWindow):
             names = "\n".join(f"- {c.video.short_name} {c.t // 60}:{c.t % 60:02d}: {c.error}" for c in skipped)
             self._info(f"완성했지만 다운로드 실패로 {len(skipped)}개 클립을 뺐습니다:\n{names}")
         self.render_done.emit(path)
+        self._schedule_autosave()
 
     def _on_render_failed(self, msg: str) -> None:
         self._set_busy(False)
@@ -357,6 +382,19 @@ class MainWindow(QMainWindow):
         self.preview.controls_panel.setEnabled(not busy)
         self.settings_action.setEnabled(not busy)
 
+    def _schedule_autosave(self) -> None:
+        if self.project_file is not None and self.project is not None:
+            self._autosave_timer.start()  # 재시작 = 디바운스
+
+    def _flush_autosave(self) -> None:
+        self._autosave_timer.stop()
+        if self.project_file is None or self.project is None:
+            return
+        try:
+            project_io.save(self.project, self.project_file)
+        except OSError:
+            log.exception("작업 자동 저장 실패")
+
     def _warn(self, text: str) -> None:
         QMessageBox.warning(self, "StampCut", text)
 
@@ -375,5 +413,6 @@ class MainWindow(QMainWindow):
             self._bridge.blockSignals(True)
             for w in active:  # 시간 안에 안 끝난 워커가 뒤늦게 시그널로 죽은 위젯을 건드리지 않도록
                 w.signals.blockSignals(True)
+        self._flush_autosave()
         self.preview.shutdown()
         event.accept()

@@ -6,6 +6,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from stampcut import __version__
+from stampcut.core import project_io
 from stampcut.core import settings as settings_mod
 
 
@@ -37,6 +38,6 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("StampCut")
-    win = MainWindow()
+    win = MainWindow(project_file=project_io.project_path())
     win.show()
     return app.exec()

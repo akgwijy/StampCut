@@ -211,6 +211,59 @@ def test_busy_locks_detached_controls_panel(qtbot):
     assert w.preview.controls_panel.isEnabled()
 
 
+def test_autosave_and_restore_roundtrip(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)  # 실제 다운로드 금지
+    pf = tmp_path / "project.json"
+    v = make_video()
+    clip = make_clip(v, 758, caption="원더골")
+    project = Project([v.url], "제목", [v], [clip])
+
+    w = MainWindow(Settings(api_key="TEST"), project_file=pf)
+    qtbot.addWidget(w)
+    assert w.project is None and not pf.exists()  # 저장 파일이 없으면 새 작업
+    w.project = project
+    w.model.set_clips(project.clips)
+    clip.caption = "수정된 자막"
+    clip.pre = 7
+    clip.zoom = 1.5
+    w._on_clip_edited(clip)  # 편집 → 자동 저장 예약(디바운스)
+    assert w._autosave_timer.isActive()
+    w._flush_autosave()  # 테스트에서는 즉시 저장
+    assert pf.exists()
+
+    w2 = MainWindow(Settings(api_key="TEST"), project_file=pf)
+    qtbot.addWidget(w2)
+    assert w2.project is not None and w2.model.rowCount() == 1
+    restored = w2.model.clip_at(0)
+    assert (restored.caption, restored.pre, restored.zoom) == ("수정된 자막", 7, 1.5)
+    assert w2.url_panel.title() == "제목"
+    assert w2.url_panel.urls() == [v.url]
+    assert "불러왔" in w2.status_panel.message.text() or "ffmpeg" in w2.status_panel.message.text()
+
+
+def test_no_project_file_disables_autosave(qtbot, make_video, make_clip):
+    v = make_video()
+    clip = make_clip(v, 758)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.project = Project([v.url], "제목", [v], [clip])
+    w._on_clip_edited(clip)
+    assert not w._autosave_timer.isActive()  # project_file 없음 → 예약 자체를 안 함
+    w._flush_autosave()  # 예외 없이 무시
+
+
+def test_close_event_flushes_autosave(qtbot, tmp_path, make_video, make_clip):
+    pf = tmp_path / "project.json"
+    v = make_video()
+    clip = make_clip(v, 758)
+    w = MainWindow(Settings(api_key="TEST"), project_file=pf)
+    qtbot.addWidget(w)
+    w.project = Project([v.url], "제목", [v], [clip])
+    w._schedule_autosave()  # 디바운스 대기 중 종료
+    w.close()
+    assert pf.exists()
+
+
 def test_style_change_saves_settings(qtbot, monkeypatch):
     saved = []
     monkeypatch.setattr(main_window.settings_mod, "save", lambda s, path=None: saved.append(s))
