@@ -70,3 +70,15 @@ def test_unknown_video_id_clip_skipped(tmp_path, make_video, make_clip):
 def test_project_path_under_config_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     assert project_io.project_path() == tmp_path / "StampCut" / "project.json"
+
+
+def test_final_path_restored_only_if_file_exists(tmp_path, make_video, make_clip):
+    pf = tmp_path / "p.json"
+    project = _project(make_video, make_clip, tmp_path)
+    final = tmp_path / "final.mp4"
+    final.write_bytes(b"x")
+    project.clips[0].final_path = final
+    project_io.save(project, pf)
+    assert project_io.load(pf).clips[0].final_path == final  # 파일이 있으면 보존
+    final.unlink()
+    assert project_io.load(pf).clips[0].final_path is None  # 파일이 지워졌으면 None
