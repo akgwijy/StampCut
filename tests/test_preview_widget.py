@@ -236,3 +236,14 @@ def test_on_position_syncs_slider_without_feedback(qtbot, monkeypatch, make_vide
     assert w.seek_slider.value() == 3000
     assert calls == []
     assert w.pos_label.text() == "0:03 / 0:18"
+
+
+def test_set_settings_refreshes_seek_range(qtbot, make_video, make_clip):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    clip = make_clip(make_video(), t=758)
+    clip.preview_start = 700  # 구간 55000..73000ms
+    w.set_clip(clip)
+    assert w.seek_slider.maximum() == 18000
+    w.set_settings(Settings(pre_seconds=5))  # 전역 앞 5초 → 구간 53000..73000
+    assert w.seek_slider.maximum() == 20000

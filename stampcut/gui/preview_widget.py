@@ -283,6 +283,7 @@ class PreviewWidget(QWidget):
         self._apply_background()
         self._sync_style_controls()
         self.relayout()
+        self._update_seek_range()
 
     def _sync_style_controls(self) -> None:
         for w in (self.title_y_spin, self.caption_y_spin):
