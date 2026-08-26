@@ -72,6 +72,15 @@ def test_project_path_under_config_dir(monkeypatch, tmp_path):
     assert project_io.project_path() == tmp_path / "StampCut" / "project.json"
 
 
+def test_non_numeric_fields_fail_safe(tmp_path, make_video, make_clip):
+    pf = tmp_path / "p.json"
+    project_io.save(_project(make_video, make_clip, tmp_path), pf)
+    data = json.loads(pf.read_text("utf-8"))
+    data["clips"][0]["pre"] = "abc"
+    pf.write_text(json.dumps(data), "utf-8")
+    assert project_io.load(pf) is None  # 손으로 망가뜨린 파일 → 새 작업
+
+
 def test_final_path_restored_only_if_file_exists(tmp_path, make_video, make_clip):
     pf = tmp_path / "p.json"
     project = _project(make_video, make_clip, tmp_path)

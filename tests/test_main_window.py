@@ -1,3 +1,5 @@
+import pytest
+
 from stampcut.core.models import Project, Settings
 from stampcut.gui import main_window
 from stampcut.gui.main_window import MainWindow
@@ -276,3 +278,41 @@ def test_style_change_saves_settings(qtbot, monkeypatch):
     assert not saved  # 드래그 중에는 저장하지 않음
     w.preview._on_text_drag_end()
     assert saved and w.settings.caption_y == 1522
+
+
+def test_url_edits_are_autosaved(qtbot, tmp_path, make_video, make_clip):
+    pf = tmp_path / "project.json"
+    v = make_video()
+    clip = make_clip(v, 758)
+    w = MainWindow(Settings(api_key="TEST"), project_file=pf)
+    qtbot.addWidget(w)
+    w.project = Project([v.url], "제목", [v], [clip])
+    w.url_panel.urls_edit.setPlainText(v.url + "\nhttps://www.youtube.com/watch?v=AAAAAAAAAAA")
+    assert w.project.urls == [v.url, "https://www.youtube.com/watch?v=AAAAAAAAAAA"]
+    assert w._autosave_timer.isActive()
+
+
+@pytest.mark.parametrize("fire", ["table", "title", "clip_updated", "rendered"])
+def test_every_edit_hook_schedules_autosave(qtbot, tmp_path, monkeypatch, make_video, make_clip, fire):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    pf = tmp_path / "project.json"
+    v = make_video()
+    clip = make_clip(v, 758)
+    w = MainWindow(Settings(api_key="TEST"), project_file=pf)
+    qtbot.addWidget(w)
+    w.project = Project([v.url], "제목", [v], [clip])
+    w.model.set_clips([clip])
+    out = tmp_path / "제목.mp4"
+    out.write_bytes(b"x")
+    if fire == "table":
+        w._on_table_changed()
+    elif fire == "title":
+        w._on_title_changed("새 제목")
+    elif fire == "clip_updated":
+        w._on_clip_updated(clip)
+    else:
+        w._render_candidates = {clip.id}
+        w._on_rendered(out)
+    assert w._autosave_timer.isActive()

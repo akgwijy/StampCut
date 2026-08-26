@@ -116,7 +116,7 @@ class Downloader:
         a, b = preview_range(clip, s)
         out = self.cache_dir / clip.video.video_id / f"preview_{a}_{b}.mp4"
         self._download(clip.video.url, a, b, PREVIEW_FORMAT, out, on_progress, cancel)
-        clip.preview_path, clip.preview_start, clip.preview_end = out, a, b
+        clip.preview_start, clip.preview_end, clip.preview_path = a, b, out
         return out
 
     def download_final(self, clip: Clip, s: Settings, on_progress=None, cancel=None) -> Path:

@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         self.url_panel = UrlPanel()
         self.url_panel.analyze_requested.connect(self.start_analysis)
         self.url_panel.title_edit.textChanged.connect(self._on_title_changed)
+        self.url_panel.urls_edit.textChanged.connect(self._on_urls_changed)
 
         self.model = ClipTableModel(self.settings)
         self.model.changed.connect(self._on_table_changed)
@@ -289,6 +290,11 @@ class MainWindow(QMainWindow):
             self.project.title = text
         self.preview.set_title(text)
         self._schedule_autosave()
+
+    def _on_urls_changed(self) -> None:
+        if self.project:
+            self.project.urls = self.url_panel.urls()
+            self._schedule_autosave()
 
     def _on_output_dir_changed(self, d: str) -> None:
         self.settings.output_dir = d

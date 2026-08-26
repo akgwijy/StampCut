@@ -58,7 +58,8 @@ def _load_clip(d: dict, by_id: dict[str, VideoInfo]) -> Clip | None:
     if video is None:
         return None
     preview_path = Path(d["preview_path"]) if d.get("preview_path") else None
-    preview_start, preview_end = d.get("preview_start"), d.get("preview_end")
+    preview_start = int(d["preview_start"]) if d.get("preview_start") is not None else None
+    preview_end = int(d["preview_end"]) if d.get("preview_end") is not None else None
     if preview_path is not None and preview_path.exists():
         status = ClipStatus.READY
     else:
@@ -75,8 +76,8 @@ def _load_clip(d: dict, by_id: dict[str, VideoInfo]) -> Clip | None:
         score=float(d["score"]),
         caption=str(d["caption"]),
         id=str(d["id"]),
-        pre=d.get("pre"),
-        post=d.get("post"),
+        pre=int(d["pre"]) if d.get("pre") is not None else None,
+        post=int(d["post"]) if d.get("post") is not None else None,
         enabled=bool(d.get("enabled", True)),
         over_limit=bool(d.get("over_limit", False)),
         zoom=float(d.get("zoom", 1.0)),
