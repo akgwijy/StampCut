@@ -318,6 +318,7 @@ def playlist_item(vid):
 
 def video_with_comments(vid, count):
     it = video_item(vid, title=f"영상 {vid[:1]}")
+    it["snippet"]["channelTitle"] = "스니펫채널명"  # fetch_channel_videos는 이 값이 아니라 채널명을 써야 한다
     it["statistics"] = {"commentCount": str(count)}
     return it
 
@@ -361,3 +362,12 @@ def test_fetch_channel_videos_keeps_whole_last_page_and_stops_without_token():
 
 def test_fetch_channel_videos_without_uploads_playlist():
     assert YouTubeClient("KEY").fetch_channel_videos(ChannelInfo(CH, "x", "")) == ([], None)
+
+
+@responses.activate
+def test_fetch_channel_videos_uses_channel_title_even_when_empty():
+    ch = ChannelInfo(CH, "", UPLOADS)
+    responses.get(f"{BASE_URL}/playlistItems", json={"items": [playlist_item(VID_A)]})
+    responses.get(f"{BASE_URL}/videos", json={"items": [video_with_comments(VID_A, 1)]})
+    videos, _ = YouTubeClient("KEY").fetch_channel_videos(ch)
+    assert videos[0].channel_title == ""  # 스니펫의 channelTitle로 대체하지 않는다

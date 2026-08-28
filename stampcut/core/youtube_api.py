@@ -245,7 +245,7 @@ class YouTubeClient:
                 continue
             info = self._video_info(it, len(infos), vid, f"https://www.youtube.com/watch?v={vid}")
             if info.comment_count > 0:
-                info.channel_title = channel.title or info.channel_title
+                info.channel_title = channel.title  # 스펙: 채널 목록의 영상은 채널명을 그대로 쓴다
                 infos.append(info)
         return infos, next_token
 
