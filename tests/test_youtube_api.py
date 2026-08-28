@@ -5,13 +5,16 @@ import pytest
 import requests
 import responses
 
+from stampcut.core.models import ChannelInfo
 from stampcut.core.youtube_api import (
     BASE_URL,
     ApiKeyError,
+    ChannelNotFound,
     QuotaError,
     VideoNotFound,
     YouTubeApiError,
     YouTubeClient,
+    parse_channel_ref,
     parse_iso_duration,
     parse_video_id,
     short_name_from_title,
@@ -19,6 +22,9 @@ from stampcut.core.youtube_api import (
 
 VID_A = "A" * 11
 VID_B = "B" * 11
+VID_C = "C" * 11
+CH = "UC" + "x" * 22
+UPLOADS = "UU" + "x" * 22
 
 
 @pytest.mark.parametrize(
@@ -246,3 +252,61 @@ def test_comment_falls_back_to_text_display():
     responses.get(f"{BASE_URL}/commentThreads", json={"items": [item]})
     out = YouTubeClient("KEY").fetch_all_comments(VID_A)
     assert [c.text for c in out] == ["7:05 하이라이트"]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("https://www.youtube.com/@moonsungfc/videos", ("handle", "@moonsungfc")),
+        ("  @moonsungfc ", ("handle", "@moonsungfc")),
+        ("https://www.youtube.com/channel/" + CH, ("id", CH)),
+        (CH, ("id", CH)),
+        ("https://youtu.be/" + VID_A, ("video", VID_A)),
+        ("https://www.youtube.com/watch?v=" + VID_A + "&t=5s", ("video", VID_A)),
+        ("https://www.youtube.com/c/moonsung", None),
+        ("https://www.youtube.com/user/moonsung", None),
+        ("hello", None),
+    ],
+)
+def test_parse_channel_ref(text, expected):
+    assert parse_channel_ref(text) == expected
+
+
+def channel_item(cid=CH, title="문성FC", uploads=UPLOADS):
+    return {"id": cid, "snippet": {"title": title}, "contentDetails": {"relatedPlaylists": {"uploads": uploads}}}
+
+
+@responses.activate
+def test_resolve_channel_by_handle_and_id():
+    responses.get(f"{BASE_URL}/channels", json={"items": [channel_item()]})
+    ch = YouTubeClient("KEY").resolve_channel("https://www.youtube.com/@moonsungfc")
+    assert ch == ChannelInfo(CH, "문성FC", UPLOADS)
+    q = parse_qs(urlparse(responses.calls[0].request.url).query)
+    assert q["forHandle"] == ["@moonsungfc"] and q["part"] == ["snippet,contentDetails"] and q["key"] == ["KEY"]
+    YouTubeClient("KEY").resolve_channel(CH)
+    q = parse_qs(urlparse(responses.calls[1].request.url).query)
+    assert q["id"] == [CH] and "forHandle" not in q
+
+
+@responses.activate
+def test_resolve_channel_from_video_url():
+    responses.get(f"{BASE_URL}/videos", json={"items": [{"id": VID_A, "snippet": {"channelId": CH}}]})
+    responses.get(f"{BASE_URL}/channels", json={"items": [channel_item()]})
+    ch = YouTubeClient("KEY").resolve_channel(f"https://youtu.be/{VID_A}")
+    assert ch.channel_id == CH and ch.uploads_playlist_id == UPLOADS
+    q0 = parse_qs(urlparse(responses.calls[0].request.url).query)
+    q1 = parse_qs(urlparse(responses.calls[1].request.url).query)
+    assert q0["id"] == [VID_A] and q0["part"] == ["snippet"] and q1["id"] == [CH]
+
+
+@responses.activate
+def test_resolve_channel_not_found_and_bad_ref():
+    responses.get(f"{BASE_URL}/channels", json={"items": []})
+    with pytest.raises(ChannelNotFound) as ei:
+        YouTubeClient("KEY").resolve_channel("@nobody")
+    assert ei.value.ref == "@nobody" and "@nobody" in str(ei.value)
+    responses.get(f"{BASE_URL}/videos", json={"items": []})
+    with pytest.raises(ChannelNotFound):
+        YouTubeClient("KEY").resolve_channel(VID_A)
+    with pytest.raises(ValueError):
+        YouTubeClient("KEY").resolve_channel("https://www.youtube.com/c/x")

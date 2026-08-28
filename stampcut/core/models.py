@@ -45,6 +45,13 @@ class VideoInfo:
 
 
 @dataclass
+class ChannelInfo:
+    channel_id: str
+    title: str
+    uploads_playlist_id: str  # 채널 업로드 재생목록 (UU…)
+
+
+@dataclass
 class AudioMix:
     """출력 오디오 믹스 설정. 볼륨은 선형 진폭 배율 0.0~1.0."""
 

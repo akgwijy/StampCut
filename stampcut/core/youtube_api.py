@@ -6,7 +6,7 @@ from datetime import datetime
 
 import requests
 
-from stampcut.core.models import RawComment, VideoInfo
+from stampcut.core.models import ChannelInfo, RawComment, VideoInfo
 
 BASE_URL = "https://www.googleapis.com/youtube/v3"
 _ID = r"([A-Za-z0-9_-]{11})"
@@ -17,6 +17,10 @@ _URL_PATTERNS = [
 _BARE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _GAME_RE = re.compile(r"(\d+)\s*게임")
 _DUR_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
+_CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
+_HANDLE_URL_RE = re.compile(r"youtube\.com/(@[A-Za-z0-9._-]+)")
+_CHANNEL_URL_RE = re.compile(r"youtube\.com/channel/(UC[A-Za-z0-9_-]{22})")
+_BARE_HANDLE_RE = re.compile(r"^@[A-Za-z0-9._-]+$")
 
 
 class YouTubeApiError(Exception):
@@ -41,6 +45,12 @@ class VideoNotFound(YouTubeApiError):
         self.video_id = video_id
 
 
+class ChannelNotFound(YouTubeApiError):
+    def __init__(self, ref: str, message: str | None = None):
+        super().__init__(message if message is not None else f"채널을 찾을 수 없습니다: {ref}")
+        self.ref = ref
+
+
 def parse_video_id(text: str) -> str | None:
     t = text.strip()
     for p in _URL_PATTERNS:
@@ -48,6 +58,26 @@ def parse_video_id(text: str) -> str | None:
         if m:
             return m.group(1)
     return t if _BARE_ID.match(t) else None
+
+
+def parse_channel_ref(text: str) -> tuple[str, str] | None:
+    """채널 주소(@핸들 / channel/UC…) 또는 영상 주소를 ("handle"|"id"|"video", 값)으로. 모르면 None.
+
+    /c/커스텀, /user/ 주소는 검색 API(100유닛)가 필요하므로 지원하지 않는다.
+    """
+    t = text.strip()
+    m = _HANDLE_URL_RE.search(t)
+    if m:
+        return "handle", m.group(1)
+    m = _CHANNEL_URL_RE.search(t)
+    if m:
+        return "id", m.group(1)
+    if _BARE_HANDLE_RE.match(t):
+        return "handle", t
+    if _CHANNEL_ID_RE.match(t):
+        return "id", t
+    vid = parse_video_id(t)
+    return ("video", vid) if vid else None
 
 
 def short_name_from_title(title: str, index: int) -> str:
@@ -110,6 +140,35 @@ class YouTubeClient:
         if r.status_code == 404:
             raise VideoNotFound("", msg)
         raise YouTubeApiError(f"HTTP {r.status_code}: {msg}")
+
+    def _channel_by(self, ref: str, **params) -> ChannelInfo:
+        data = self._get("channels", part="snippet,contentDetails", **params)
+        items = data.get("items") or []
+        if not items:
+            raise ChannelNotFound(ref)
+        it = items[0]
+        return ChannelInfo(
+            channel_id=it["id"],
+            title=it.get("snippet", {}).get("title", ""),
+            uploads_playlist_id=it.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", ""),
+        )
+
+    def resolve_channel(self, text: str) -> ChannelInfo:
+        """채널 주소·핸들·채널 id, 또는 그 채널의 영상 주소로 채널을 찾는다 (1~2유닛)."""
+        ref = parse_channel_ref(text)
+        if ref is None:
+            raise ValueError(text)
+        kind, value = ref
+        if kind == "handle":
+            return self._channel_by(text, forHandle=value)
+        if kind == "id":
+            return self._channel_by(text, id=value)
+        data = self._get("videos", part="snippet", id=value)
+        items = data.get("items") or []
+        channel_id = items[0].get("snippet", {}).get("channelId") if items else None
+        if not channel_id:
+            raise ChannelNotFound(text)
+        return self._channel_by(text, id=channel_id)
 
     def fetch_video_infos(self, urls: list[str], strict: bool = True) -> list[VideoInfo]:
         """strict=False면 응답에 없는 영상은 건너뛴다. 하나도 못 찾았을 때만 VideoNotFound."""
