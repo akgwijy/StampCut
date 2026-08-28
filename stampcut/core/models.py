@@ -28,6 +28,7 @@ class Settings:
     title_color: str = "#FFFFFF"
     caption_y: int = 1552  # 자막 블록 상단
     caption_color: str = "#FFFFFF"
+    bgm_dir: str = ""  # 마지막으로 고른 배경 음악 폴더
 
 
 @dataclass
@@ -41,6 +42,25 @@ class VideoInfo:
     published_at: datetime
     duration: int
     comment_count: int
+
+
+@dataclass
+class AudioMix:
+    """출력 오디오 믹스 설정. 볼륨은 선형 진폭 배율 0.0~1.0."""
+
+    original_volume: float = 1.0
+    bgm_path: str = ""  # 절대 경로. "" = BGM 없음
+    bgm_volume: float = 0.3
+    bgm_offset: float = 0.0  # 음원 시작점(초)
+    bgm_start: float = 0.0  # 영상 내 시작(초)
+    bgm_end: float | None = None  # 영상 내 끝(초). None = 영상 끝까지
+
+    def has_bgm(self) -> bool:
+        return bool(self.bgm_path)
+
+    def is_default(self) -> bool:
+        """믹스 단계를 건너뛰어도 되는 상태 (BGM 없고 원본 100%)."""
+        return not self.has_bgm() and self.original_volume == 1.0
 
 
 @dataclass
@@ -115,6 +135,7 @@ class Project:
     videos: list[VideoInfo]
     clips: list[Clip]
     warnings: list[str] = field(default_factory=list)
+    audio: AudioMix = field(default_factory=AudioMix)
 
     def enabled_clips(self) -> list[Clip]:
         return [c for c in self.clips if c.enabled]

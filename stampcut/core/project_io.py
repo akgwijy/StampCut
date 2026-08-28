@@ -8,13 +8,32 @@ from datetime import datetime
 from pathlib import Path
 
 from stampcut.core import settings as settings_mod
-from stampcut.core.models import Clip, ClipStatus, Mention, Project, VideoInfo
+from stampcut.core.models import AudioMix, Clip, ClipStatus, Mention, Project, VideoInfo
 
-VERSION = 1
+VERSION = 2
+SUPPORTED_VERSIONS = (1, 2)  # v1: audio 없음 → 기본값
 
 
 def project_path() -> Path:
     return settings_mod.config_dir() / "project.json"
+
+
+def _audio_from(d) -> AudioMix:
+    """audio 항목이 없거나 깨졌으면 기본값 — 프로젝트 전체를 버리지 않는다."""
+    if not isinstance(d, dict):
+        return AudioMix()
+    try:
+        end = d.get("bgm_end")
+        return AudioMix(
+            original_volume=float(d.get("original_volume", 1.0)),
+            bgm_path=str(d.get("bgm_path") or ""),
+            bgm_volume=float(d.get("bgm_volume", 0.3)),
+            bgm_offset=float(d.get("bgm_offset", 0.0)),
+            bgm_start=float(d.get("bgm_start", 0.0)),
+            bgm_end=float(end) if end is not None else None,
+        )
+    except (TypeError, ValueError):
+        return AudioMix()
 
 
 def _clip_dict(c: Clip) -> dict:
@@ -46,6 +65,7 @@ def save(project: Project, path: Path) -> None:
         "title": project.title,
         "videos": [{**asdict(v), "published_at": v.published_at.isoformat()} for v in project.videos],
         "clips": [_clip_dict(c) for c in project.clips],
+        "audio": asdict(project.audio),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -95,7 +115,7 @@ def load(path: Path) -> Project | None:
     """저장된 작업을 되살린다. 어떤 오류든 None — 새 작업으로 시작하게 한다."""
     try:
         data = json.loads(path.read_text("utf-8"))
-        if not isinstance(data, dict) or data.get("version") != VERSION:
+        if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
             return None
         videos = []
         for raw in data["videos"]:
@@ -104,6 +124,6 @@ def load(path: Path) -> Project | None:
             videos.append(VideoInfo(**v))
         by_id = {v.video_id: v for v in videos}
         clips = [c for raw in data["clips"] if (c := _load_clip(raw, by_id)) is not None]
-        return Project(urls=list(data["urls"]), title=str(data["title"]), videos=videos, clips=clips)
+        return Project(urls=list(data["urls"]), title=str(data["title"]), videos=videos, clips=clips, audio=_audio_from(data.get("audio")))
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
