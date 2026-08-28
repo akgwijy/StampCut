@@ -33,6 +33,10 @@ def render_dir() -> Path:
     return data_dir() / "render"
 
 
+def preview_dir() -> Path:
+    return data_dir() / "preview"
+
+
 def log_dir() -> Path:
     return data_dir() / "logs"
 

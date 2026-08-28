@@ -1,10 +1,12 @@
 from pathlib import Path
 
 from stampcut.core.ffmpeg import FfmpegPaths, ProbeInfo
-from stampcut.core.models import Settings
+from stampcut.core.models import AudioMix, Settings
 from stampcut.core.renderer import (
+    PREVIEW_PROFILE,
     build_clip_command,
     build_concat_command,
+    build_mix_command,
     ff_color,
     ff_path,
     sanitize_filename,
@@ -110,3 +112,84 @@ def test_style_y_clamped_to_canvas(tmp_path, make_video, make_clip):
     s = Settings(title_y=-50, caption_y=99999)
     fc = filter_complex(build(tmp_path, make_clip(make_video(), t=758), s)[0])
     assert "y=0-text_h/2" in fc and "y=1920" in fc and "y=1878" in fc
+
+
+def test_preview_profile_scales_layout_and_speeds_encode(tmp_path, make_video, make_clip):
+    clip = make_clip(make_video(), t=758, caption="원더골")
+    clip.preview_path = tmp_path / "preview.mp4"
+    cmd, out = build_clip_command(
+        paths(tmp_path), clip, Settings(), "제목", probe(), tmp_path, 3, tmp_path / "font.otf",
+        profile=PREVIEW_PROFILE, source=clip.preview_path, in_offset=7,
+    )
+    fc = filter_complex(cmd)
+    assert cmd[cmd.index("-ss") + 1] == "7" and cmd.index("-ss") < cmd.index("-i")
+    assert cmd[cmd.index("-i") + 1] == str(clip.preview_path)
+    assert out == tmp_path / "clip_003.mp4"
+    assert "crop=540:540" in fc and "s=540x960" in fc and "overlay=0:210" in fc
+    assert "fontsize=32" in fc and "fontsize=18" in fc and "fontsize=30" in fc
+    assert "y=105-text_h/2" in fc and "y=755" in fc and "y=776" in fc and "borderw=2" in fc
+    assert cmd[cmd.index("-preset") + 1] == "ultrafast" and cmd[cmd.index("-crf") + 1] == "28"
+    assert (tmp_path / "clip_003_caption.txt").read_text("utf-8") == "원더골"
+
+
+def test_default_profile_has_no_seek_and_uses_final_path(tmp_path, make_video, make_clip):
+    cmd, _ = build(tmp_path, make_clip(make_video(), t=758))
+    assert "-ss" not in cmd and cmd[cmd.index("-i") + 1] == str(tmp_path / "final.mp4")
+    assert cmd[cmd.index("-preset") + 1] == "medium"
+
+
+def test_mix_command_with_bgm(tmp_path):
+    song = tmp_path / "song.mp3"
+    audio = AudioMix(original_volume=0.5, bgm_path=str(song), bgm_volume=0.3, bgm_offset=30.0, bgm_start=5.0, bgm_end=65.0)
+    cmd = build_mix_command(paths(tmp_path), tmp_path / "concat.mp4", audio, 180.0, tmp_path / "out.mp4")
+    fc = filter_complex(cmd)
+    i_bgm = cmd.index(str(song))
+    assert cmd[i_bgm - 1] == "-i" and cmd[i_bgm - 3:i_bgm - 1] == ["-stream_loop", "-1"]
+    assert cmd[cmd.index("-i") + 1] == str(tmp_path / "concat.mp4")  # 첫 -i는 영상
+    assert "[0:a]volume=0.500[a0]" in fc
+    assert "[1:a]atrim=start=30.000,asetpts=PTS-STARTPTS,atrim=duration=60.000,asetpts=PTS-STARTPTS" in fc
+    assert "afade=t=in:d=1,afade=t=out:st=58.000:d=2,volume=0.300,adelay=5000|5000,apad[a1]" in fc
+    assert "[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]" in fc
+    assert cmd[cmd.index("-c:v") + 1] == "copy" and cmd[cmd.index("-t") + 1] == "180.000"
+    assert cmd[cmd.index("-map") + 1] == "0:v" and "[a]" in cmd
+    assert cmd[-1] == str(tmp_path / "out.mp4")
+
+
+def test_mix_command_without_bgm_only_scales_original(tmp_path):
+    cmd = build_mix_command(paths(tmp_path), tmp_path / "c.mp4", AudioMix(original_volume=0.25), 30.0, tmp_path / "o.mp4")
+    assert filter_complex(cmd) == "[0:a]volume=0.250[a]"
+    assert "-stream_loop" not in cmd and cmd.count("-i") == 1
+
+
+def test_mix_command_drops_bgm_when_section_too_short(tmp_path):
+    audio = AudioMix(bgm_path="s.mp3", bgm_start=100.0, bgm_end=100.2)
+    cmd = build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 180.0, tmp_path / "o.mp4")
+    assert filter_complex(cmd) == "[0:a]volume=1.000[a]" and "s.mp3" not in cmd
+    audio = AudioMix(bgm_path="s.mp3", bgm_start=500.0)  # 구간이 영상 밖 → total로 잘려 0초
+    assert "s.mp3" not in build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 180.0, tmp_path / "o.mp4")
+
+
+def test_mix_command_end_none_runs_to_total(tmp_path):
+    audio = AudioMix(bgm_path="s.mp3", bgm_start=10.0)
+    fc = filter_complex(build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 100.0, tmp_path / "o.mp4"))
+    assert "atrim=duration=90.000" in fc and "afade=t=out:st=88.000:d=2" in fc and "adelay=10000|10000" in fc
+
+
+def test_mix_command_clamps_negative_offset_to_zero(tmp_path):
+    audio = AudioMix(bgm_path="s.mp3", bgm_offset=-5.0)
+    fc = filter_complex(build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 30.0, tmp_path / "o.mp4"))
+    assert "atrim=start=0.000" in fc
+
+
+def test_preview_profile_wraps_like_final(tmp_path, make_video, make_clip):
+    long_caption = "아주 긴 자막 문장이 계속 이어져서 한 줄에 다 들어가지 않는다 " * 3
+    final_clip = make_clip(make_video(), t=758, caption=long_caption)
+    build(tmp_path, final_clip)
+    final_txt = (tmp_path / "clip_003_caption.txt").read_text("utf-8")
+    assert "\n" in final_txt  # 최종 렌더에서 두 줄로 나뉜다
+    pv = tmp_path / "pv"
+    pv.mkdir()
+    preview_clip = make_clip(make_video(), t=758, caption=long_caption)
+    preview_clip.preview_path = tmp_path / "preview.mp4"
+    build_clip_command(paths(tmp_path), preview_clip, Settings(), "제목", probe(), pv, 3, tmp_path / "font.otf", profile=PREVIEW_PROFILE, source=preview_clip.preview_path)
+    assert (pv / "clip_003_caption.txt").read_text("utf-8") == final_txt  # 배율과 무관하게 같은 자리에서 줄바꿈

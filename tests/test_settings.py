@@ -13,6 +13,7 @@ def test_dirs_follow_env(monkeypatch, tmp_path):
     assert sm.cache_dir() == tmp_path / "local" / "StampCut" / "cache"
     assert sm.render_dir() == tmp_path / "local" / "StampCut" / "render"
     assert sm.log_dir() == tmp_path / "local" / "StampCut" / "logs"
+    assert sm.preview_dir() == tmp_path / "local" / "StampCut" / "preview"
 
 
 def test_load_missing_returns_defaults(tmp_path):
@@ -65,3 +66,11 @@ def test_style_fields_roundtrip_and_legacy_defaults(tmp_path):
     old = sm.load(p)
     assert (old.title_y, old.title_color) == (210, "#FFFFFF")
     assert (old.caption_y, old.caption_color) == (1552, "#FFFFFF")
+
+
+def test_bgm_dir_roundtrip_and_legacy_default(tmp_path):
+    p = tmp_path / "s.json"
+    sm.save(Settings(bgm_dir=r"D:\music"), p)
+    assert sm.load(p).bgm_dir == r"D:\music"
+    p.write_text(json.dumps({"api_key": "K"}), "utf-8")
+    assert sm.load(p).bgm_dir == ""

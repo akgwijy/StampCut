@@ -1,7 +1,7 @@
 import json
 
 from stampcut.core import project_io
-from stampcut.core.models import ClipStatus, Mention, Project
+from stampcut.core.models import AudioMix, ClipStatus, Mention, Project
 
 
 def _project(make_video, make_clip, tmp_path, with_preview=False):
@@ -91,3 +91,44 @@ def test_final_path_restored_only_if_file_exists(tmp_path, make_video, make_clip
     assert project_io.load(pf).clips[0].final_path == final  # 파일이 있으면 보존
     final.unlink()
     assert project_io.load(pf).clips[0].final_path is None  # 파일이 지워졌으면 None
+
+
+def test_audio_roundtrip_v2(tmp_path, make_video, make_clip):
+    pf = tmp_path / "p.json"
+    project = _project(make_video, make_clip, tmp_path)
+    project.audio = AudioMix(original_volume=0.5, bgm_path=str(tmp_path / "song.mp3"), bgm_volume=0.2, bgm_offset=30.0, bgm_start=5.0, bgm_end=60.0)
+    project_io.save(project, pf)
+    assert json.loads(pf.read_text("utf-8"))["version"] == 2
+    assert project_io.load(pf).audio == project.audio
+
+
+def test_v1_file_loads_with_default_audio(tmp_path, make_video, make_clip):
+    pf = tmp_path / "p.json"
+    project_io.save(_project(make_video, make_clip, tmp_path), pf)
+    data = json.loads(pf.read_text("utf-8"))
+    data["version"] = 1
+    del data["audio"]
+    pf.write_text(json.dumps(data), "utf-8")
+    loaded = project_io.load(pf)
+    assert loaded is not None and loaded.audio == AudioMix() and len(loaded.clips) == 1
+
+
+def test_broken_audio_falls_back_to_default(tmp_path, make_video, make_clip):
+    pf = tmp_path / "p.json"
+    project_io.save(_project(make_video, make_clip, tmp_path), pf)
+    data = json.loads(pf.read_text("utf-8"))
+    data["audio"] = {"bgm_volume": "loud"}
+    pf.write_text(json.dumps(data), "utf-8")
+    loaded = project_io.load(pf)
+    assert loaded is not None and loaded.audio == AudioMix() and len(loaded.clips) == 1
+    data["audio"] = "nope"
+    pf.write_text(json.dumps(data), "utf-8")
+    assert project_io.load(pf).audio == AudioMix()
+
+
+def test_missing_bgm_file_path_is_kept(tmp_path, make_video, make_clip):
+    pf = tmp_path / "p.json"
+    project = _project(make_video, make_clip, tmp_path)
+    project.audio.bgm_path = str(tmp_path / "gone.mp3")
+    project_io.save(project, pf)
+    assert project_io.load(pf).audio.bgm_path == str(tmp_path / "gone.mp3")

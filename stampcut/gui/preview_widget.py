@@ -1,6 +1,7 @@
 """최종 결과와 같은 9:16 미리보기. 정방형 안 영상을 드래그·줌으로 조절한다."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QUrl, Signal
@@ -8,6 +9,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QPainter, QPen
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QColorDialog,
     QFormLayout,
     QGraphicsRectItem,
@@ -24,12 +26,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from stampcut.core.models import Clip, Settings
+from stampcut.core.bgm_sync import bgm_position
+from stampcut.core.models import AudioMix, Clip, Settings
 from stampcut.core.renderer import LAYOUT, TIME_GAP, ZOOM_MAX, ZOOM_MIN, SquareGeometry, compute_square_geometry
 from stampcut.core.textwrap_kr import wrap
 from stampcut.core.timestamps import format_time
 
 _S = LAYOUT["square"]
+BGM_RESYNC_MS = 250  # 전체 미리보기와 BGM 위치 차이가 이보다 크면 다시 맞춘다
+BGM_SEEK_COOLDOWN_MS = 500  # 재동기 seek이 착지할 시간을 준다 (연속 seek 방지)
 
 
 def pan_after_drag(pan_x: float, pan_y: float, dx: float, dy: float, g: SquareGeometry, square: int = _S) -> tuple[float, float]:
@@ -105,6 +110,9 @@ class _DragView(QGraphicsView):
 class PreviewWidget(QWidget):
     clip_changed = Signal(object)
     style_changed = Signal()  # 타이틀·자막 위치/색 변경 (settings에 직접 반영됨; 메인 창이 저장)
+    full_preview_requested = Signal()
+    bgm_error = Signal(str)
+    playback_started = Signal()  # 이 위젯이 재생을 시작함 (BGM만 듣기와 겹치지 않도록 메인 창이 듣는다)
 
     def __init__(self, settings: Settings, font_family: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -114,6 +122,15 @@ class PreviewWidget(QWidget):
         self.title = ""
         self._source_size = (1920, 1080)
         self._loaded_path: Path | None = None
+        self.audio_mix: AudioMix | None = None
+        self._mode = "clip"
+        self._full_path: Path | None = None
+        self._full_signature: str | None = None
+        self._full_stale = False
+        self._full_duration_ms = 0
+        self._bgm_loaded = ""
+        self._bgm_duration_ms = 0
+        self._bgm_last_seek = 0.0  # time.monotonic()
 
         L = LAYOUT
         self._shut_down = False
@@ -128,6 +145,12 @@ class PreviewWidget(QWidget):
         self.video_item = QGraphicsVideoItem(self.square)
         self.video_item.nativeSizeChanged.connect(self._on_native_size)
 
+        self.full_item = QGraphicsVideoItem()  # 전체 미리보기: 캔버스 전체 (이미 9:16으로 구워진 파일)
+        self.full_item.setSize(QSizeF(L["canvas_w"], L["canvas_h"]))
+        self.full_item.setPos(0, 0)
+        self.full_item.setVisible(False)
+        self.scene.addItem(self.full_item)
+
         self.title_item = self._text_item(L["title_font"], self.settings.title_color)
         self.time_item = self._text_item(L["time_font"], L["time_color"])
         self.caption_item = self._text_item(L["caption_font"], self.settings.caption_color, border=L["caption_border"])
@@ -138,6 +161,13 @@ class PreviewWidget(QWidget):
         self.player.setVideoOutput(self.video_item)
         self.player.positionChanged.connect(self._on_position)
         self.player.setLoops(QMediaPlayer.Loops.Infinite)
+        self.player.durationChanged.connect(self._on_duration)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
+        self.bgm_player = QMediaPlayer(self)
+        self.bgm_audio = QAudioOutput(self)
+        self.bgm_player.setAudioOutput(self.bgm_audio)
+        self.bgm_player.durationChanged.connect(self._on_bgm_duration)
+        self.bgm_player.errorOccurred.connect(lambda _err, msg: self.bgm_error.emit(msg))
 
         self.view = _DragView(self.scene, self._on_drag, self._hit_text, self._on_text_drag, self._on_text_drag_end)
         self.play_btn = QPushButton("▶ 재생")
@@ -209,6 +239,27 @@ class PreviewWidget(QWidget):
         controls.addRow("자막", crow)
         controls.addRow(self.reset_btn)
 
+        self.clip_mode_btn = QPushButton("클립")
+        self.clip_mode_btn.setCheckable(True)
+        self.clip_mode_btn.setChecked(True)
+        self.full_mode_btn = QPushButton("전체")
+        self.full_mode_btn.setCheckable(True)
+        self.full_mode_btn.setEnabled(False)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_group.addButton(self.clip_mode_btn)
+        self.mode_group.addButton(self.full_mode_btn)
+        self.clip_mode_btn.clicked.connect(self._on_clip_mode_clicked)
+        self.full_mode_btn.clicked.connect(self._on_full_mode_clicked)
+        self.make_full_btn = QPushButton("전체 미리보기 만들기")
+        self.make_full_btn.clicked.connect(self.full_preview_requested)
+        self.full_status = QLabel("")
+        self.mode_row = QHBoxLayout()
+        self.mode_row.addWidget(self.clip_mode_btn)
+        self.mode_row.addWidget(self.full_mode_btn)
+        self.mode_row.addWidget(self.make_full_btn)
+        self.mode_row.addWidget(self.full_status, 1)
+
         self.transport = QHBoxLayout()
         self.transport.addWidget(self.play_btn)
         self.transport.addWidget(self.back5_btn)
@@ -220,6 +271,7 @@ class PreviewWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.view, 1)
+        layout.addLayout(self.mode_row)
         layout.addLayout(self.transport)
         self._set_controls_enabled(False)
 
@@ -274,6 +326,8 @@ class PreviewWidget(QWidget):
         self.player.stop()
         self.player.setVideoOutput(None)
         self.player.setSource(QUrl())
+        self.bgm_player.stop()
+        self.bgm_player.setSource(QUrl())
 
     def closeEvent(self, event) -> None:
         self.shutdown()
@@ -297,13 +351,22 @@ class PreviewWidget(QWidget):
         self._paint_color_button(self.title_color_btn, self.settings.title_color)
         self._paint_color_button(self.caption_color_btn, self.settings.caption_color)
 
+    def pause(self) -> None:
+        """재생 중이면 일시정지 (BGM 동기 플레이어 포함). 재생 중이 아니면 아무 일도 없다."""
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+            self.play_btn.setText("▶ 재생")
+        self.bgm_player.pause()
+
     def set_title(self, title: str) -> None:
         self.title = title
         self.relayout()
 
     def set_clip(self, clip: Clip | None) -> None:
-        self.player.stop()
         self.clip = clip
+        if self._mode == "full":
+            return  # 전체 모드에선 선택만 기억하고, 클립 모드로 돌아올 때 반영한다
+        self.player.stop()
         self._set_controls_enabled(clip is not None)
         if clip is None:
             self.video_item.setVisible(False)
@@ -317,7 +380,7 @@ class PreviewWidget(QWidget):
         self.refresh_media()
 
     def refresh_media(self) -> None:
-        if self._shut_down:
+        if self._shut_down or self._mode == "full":
             return
         clip = self.clip
         if clip is None or clip.preview_path is None or not clip.preview_path.exists():
@@ -328,7 +391,122 @@ class PreviewWidget(QWidget):
         self._update_seek_range()
         self.player.setPosition(self._window_ms()[0])
         self.player.play()
+        self.playback_started.emit()
         self.play_btn.setText("⏸ 일시정지")
+
+    # --- 전체 미리보기 ---
+    def mode(self) -> str:
+        return self._mode
+
+    def full_signature(self) -> str | None:
+        return self._full_signature
+
+    def set_full_preview(self, path: Path, signature: str) -> None:
+        self._full_path, self._full_signature, self._full_stale = path, signature, False
+        self._full_duration_ms = 0
+        self.full_mode_btn.setEnabled(True)
+        self.full_status.setText("전체 미리보기 최신")
+        self.set_mode("full")
+
+    def mark_full_preview_stale(self) -> None:
+        if self._full_path is not None and not self._full_stale:
+            self._full_stale = True
+            self.full_status.setText("클립이 바뀌었습니다 — 다시 만들기")
+
+    def clear_full_preview(self) -> None:
+        was_full = self._mode == "full"
+        self._full_path = self._full_signature = None
+        self._full_stale = False
+        self._full_duration_ms = 0
+        self.full_mode_btn.setEnabled(False)
+        self.full_status.setText("")
+        if was_full:
+            self.set_mode("clip")
+
+    def set_mode(self, mode: str) -> None:
+        """"clip" 또는 "full". 전체 파일이 없으면 clip. 같은 모드로 다시 부르면 미디어를 다시 연다."""
+        if mode == "full" and self._full_path is None:
+            mode = "clip"
+        self.player.stop()
+        self.bgm_player.pause()
+        self._mode = mode
+        self.clip_mode_btn.setChecked(mode == "clip")
+        self.full_mode_btn.setChecked(mode == "full")
+        self.controls_panel.setEnabled(mode == "clip")
+        if mode == "full":
+            self.player.setLoops(1)
+            self.player.setVideoOutput(self.full_item)
+            self._loaded_path = self._full_path
+            self.player.setSource(QUrl.fromLocalFile(str(self._full_path)))
+            self.audio.setVolume(self.audio_mix.original_volume if self.audio_mix is not None else 1.0)
+            self.relayout()
+            self._set_controls_enabled(True)
+            self._update_seek_range()
+            self.player.play()
+            self.playback_started.emit()
+            self.play_btn.setText("⏸ 일시정지")
+        else:
+            self.player.setLoops(QMediaPlayer.Loops.Infinite)
+            self.player.setVideoOutput(self.video_item)
+            self.audio.setVolume(1.0)
+            self._loaded_path = None
+            self.set_clip(self.clip)
+
+    def _on_clip_mode_clicked(self) -> None:
+        if self._mode != "clip":
+            self.set_mode("clip")
+        else:
+            self.clip_mode_btn.setChecked(True)
+
+    def _on_full_mode_clicked(self) -> None:
+        if self._mode != "full":
+            self.set_mode("full")
+        else:
+            self.full_mode_btn.setChecked(True)
+
+    # --- BGM 동기 재생 ---
+    def set_audio_mix(self, mix: AudioMix | None) -> None:
+        self.audio_mix = mix
+        path = mix.bgm_path if mix is not None and mix.has_bgm() and Path(mix.bgm_path).is_file() else ""
+        if path != self._bgm_loaded:
+            self._bgm_loaded = path
+            self._bgm_duration_ms = 0
+            self.bgm_player.stop()
+            self.bgm_player.setSource(QUrl.fromLocalFile(path) if path else QUrl())
+        self.bgm_audio.setVolume(mix.bgm_volume if mix is not None else 0.0)
+        if self._mode == "full":
+            self.audio.setVolume(mix.original_volume if mix is not None else 1.0)
+            self._sync_bgm(self.player.position())
+
+    def _on_bgm_duration(self, ms: int) -> None:
+        self._bgm_duration_ms = max(0, ms)
+        if self._mode == "full":
+            self._sync_bgm(self.player.position())
+
+    def _seek_bgm(self, target_ms: int) -> None:
+        self.bgm_player.setPosition(target_ms)
+        self._bgm_last_seek = time.monotonic()
+
+    def _sync_bgm(self, t_ms: int) -> None:
+        """영상 위치 t_ms에 맞춰 BGM을 재생/정지/재동기한다. 규칙은 bgm_position (렌더와 동일)."""
+        playing = self._mode == "full" and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        mix = self.audio_mix
+        if not playing or mix is None or not self._bgm_loaded:
+            self.bgm_player.pause()
+            return
+        pos = bgm_position(t_ms / 1000, mix, self._bgm_duration_ms / 1000, self._full_duration_ms / 1000)
+        if pos is None:
+            self.bgm_player.pause()
+            return
+        target = int(pos * 1000)
+        if self.bgm_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self._seek_bgm(target)
+            self.bgm_player.play()
+            return
+        drift = abs(self.bgm_player.position() - target)
+        cooling = (time.monotonic() - self._bgm_last_seek) * 1000 < BGM_SEEK_COOLDOWN_MS
+        if drift > BGM_RESYNC_MS and not cooling:
+            self._seek_bgm(target)
 
     # --- 배치 ---
     def relayout(self) -> None:
@@ -347,11 +525,15 @@ class PreviewWidget(QWidget):
         self.caption_item.setBrush(QBrush(QColor(s.caption_color)))
         self._place_text(self.title_item, wrap(self.title, L["title_font"], L["max_text_width"], L["max_lines"]), center=title_y)
         show_time = bool(clip) and s.show_time_in_caption
-        self.time_item.setVisible(show_time)
         if clip:
             self._place_text(self.time_item, format_time(clip.t), top=caption_y - TIME_GAP)
             self._place_text(self.caption_item, wrap(clip.caption, L["caption_font"], L["max_text_width"], L["max_lines"]), top=caption_y)
-        self.caption_item.setVisible(bool(clip))
+        full = self._mode == "full"
+        self.title_item.setVisible(not full)
+        self.time_item.setVisible(show_time and not full)
+        self.caption_item.setVisible(bool(clip) and not full)
+        self.square.setVisible(not full)
+        self.full_item.setVisible(full)
 
     def _place_text(self, item: QGraphicsSimpleTextItem, text: str, top: float | None = None, center: float | None = None) -> None:
         item.setText(text)
@@ -378,11 +560,23 @@ class PreviewWidget(QWidget):
 
     # --- 재생 ---
     def _window_ms(self) -> tuple[int, int]:
+        if self._mode == "full":
+            return 0, self._full_duration_ms
         clip = self.clip
         if clip is None or clip.preview_start is None:
             return 0, 0
         s = self.settings
         return (clip.start(s) - clip.preview_start) * 1000, (clip.end(s) - clip.preview_start) * 1000
+
+    def _on_duration(self, ms: int) -> None:
+        if self._mode == "full":
+            self._full_duration_ms = max(0, ms)
+            self._update_seek_range()
+
+    def _on_media_status(self, status) -> None:
+        if self._mode == "full" and status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.play_btn.setText("▶ 재생")
+            self.bgm_player.pause()
 
     def _update_seek_range(self) -> None:
         start, end = self._window_ms()
@@ -394,15 +588,18 @@ class PreviewWidget(QWidget):
         start, end = self._window_ms()
         if end:
             self.player.setPosition(start + value)
+            self._sync_bgm(start + value)
 
     def _seek_by(self, delta_s: int) -> None:
         start, end = self._window_ms()
         if end:
-            self.player.setPosition(seek_target(self.player.position(), delta_s, start, end))
+            target = seek_target(self.player.position(), delta_s, start, end)
+            self.player.setPosition(target)
+            self._sync_bgm(target)
 
     def _on_position(self, ms: int) -> None:
         start, end = self._window_ms()
-        if end and (ms >= end or ms < start - 500):
+        if self._mode == "clip" and end and (ms >= end or ms < start - 500):
             self.player.setPosition(start)
             return
         if not self.seek_slider.isSliderDown():
@@ -410,13 +607,24 @@ class PreviewWidget(QWidget):
             self.seek_slider.setValue(min(max(0, ms - start), max(0, end - start)))
             self.seek_slider.blockSignals(False)
         self.pos_label.setText(f"{format_time(max(0, ms - start) // 1000)} / {format_time(max(0, end - start) // 1000)}")
+        if self._mode == "full":
+            self._sync_bgm(ms)
 
     def _toggle_play(self) -> None:
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        state = self.player.playbackState()
+        if state == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
             self.play_btn.setText("▶ 재생")
-        elif self.player.playbackState() == QMediaPlayer.PlaybackState.PausedState and self._loaded_path is not None:
+            self.bgm_player.pause()
+        elif state == QMediaPlayer.PlaybackState.PausedState and self._loaded_path is not None:
             self.player.play()
+            self.playback_started.emit()
+            self.play_btn.setText("⏸ 일시정지")
+            self._sync_bgm(self.player.position())
+        elif self._mode == "full":
+            self.player.setPosition(0)
+            self.player.play()
+            self.playback_started.emit()
             self.play_btn.setText("⏸ 일시정지")
         else:
             self.refresh_media()
@@ -433,7 +641,7 @@ class PreviewWidget(QWidget):
 
     def _on_drag(self, dx: float, dy: float) -> None:
         clip = self.clip
-        if clip is None:
+        if clip is None or self._mode == "full":
             return
         w, h = self._source_size
         g = compute_square_geometry(w, h, clip.zoom, clip.pan_x, clip.pan_y, _S)

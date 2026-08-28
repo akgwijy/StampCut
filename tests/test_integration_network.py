@@ -6,8 +6,8 @@ import pytest
 from stampcut.core import ffmpeg as ff
 from stampcut.core import pipeline
 from stampcut.core.downloader import Downloader
-from stampcut.core.models import Clip, Project, Settings, VideoInfo
-from stampcut.core.renderer import build_clip_command
+from stampcut.core.models import AudioMix, Clip, Project, Settings, VideoInfo
+from stampcut.core.renderer import build_clip_command, build_mix_command
 from stampcut.core.settings import bundled_font_path
 
 pytestmark = pytest.mark.network
@@ -73,3 +73,21 @@ def test_render_two_clips_end_to_end(tmp_path, paths, monkeypatch):
     assert abs(info.duration - expected) <= 1.0, f"{info.duration} vs {expected}"
     assert info.has_audio
     assert not [d for d in render_root.iterdir() if d.is_dir()]
+
+
+def test_mix_bgm_over_generated_video(tmp_path, paths):
+    """생성한 사인파 BGM을 짧은 테스트 영상에 섞는다. 곡(3초)이 구간(5.5초)보다 짧아 반복 경로도 탄다."""
+    video = tmp_path / "video.mp4"
+    ff.run([
+        paths.ffmpeg, "-hide_banner",
+        "-f", "lavfi", "-i", "testsrc=size=1080x1920:rate=30:duration=6",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=6",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", video,
+    ])
+    song = tmp_path / "song.wav"
+    ff.run([paths.ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=3", song])
+    audio = AudioMix(original_volume=0.5, bgm_path=str(song), bgm_volume=0.3, bgm_offset=1.0, bgm_start=0.5, bgm_end=None)
+    out = tmp_path / "mixed.mp4"
+    ff.run(build_mix_command(paths, video, audio, 6.0, out), total_seconds=6.0)
+    info = ff.probe(paths, out)
+    assert info.has_audio and abs(info.duration - 6.0) < 0.3 and (info.width, info.height) == (1080, 1920)

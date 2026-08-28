@@ -37,3 +37,13 @@ def test_project_total_duration_counts_enabled_only(make_video, make_clip):
     p = Project(urls=[v.url], title="t", videos=[v], clips=[a, b])
     assert p.enabled_clips() == [a]
     assert p.total_duration(Settings()) == 18
+
+
+def test_audio_mix_flags():
+    from stampcut.core.models import AudioMix
+
+    assert AudioMix().is_default() and not AudioMix().has_bgm()
+    assert not AudioMix(original_volume=0.5).is_default()
+    a = AudioMix(bgm_path="x.mp3")
+    assert a.has_bgm() and not a.is_default()
+    assert Project([], "t", [], []).audio == AudioMix()

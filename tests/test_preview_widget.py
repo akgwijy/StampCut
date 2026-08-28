@@ -1,8 +1,9 @@
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QGraphicsScene
 
-from stampcut.core.models import Settings
+from stampcut.core.models import AudioMix, Settings
 from stampcut.core.renderer import compute_square_geometry
 from stampcut.gui.preview_widget import PreviewWidget, _DragView, pan_after_drag, seek_target, video_item_placement
 
@@ -272,3 +273,180 @@ def test_on_position_leaves_slider_alone_while_user_drags(qtbot, make_video, mak
     w.seek_slider.setSliderDown(False)
     w._on_position(58000)
     assert w.seek_slider.value() == 3000
+
+
+def _full_file(tmp_path):
+    p = tmp_path / "full_x.mp4"
+    p.write_bytes(b"x")
+    return p
+
+
+def _widget(qtbot, monkeypatch):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    # 가짜 파일을 실제로 열지 않는다
+    monkeypatch.setattr(w.player, "setSource", lambda url: None)
+    monkeypatch.setattr(w.player, "play", lambda: None)
+    monkeypatch.setattr(w.bgm_player, "setSource", lambda url: None)
+    monkeypatch.setattr(w.bgm_player, "play", lambda: None)
+    return w
+
+
+def test_full_mode_switches_output_and_hides_overlays(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    clip = make_clip(make_video(), t=758, caption="원더골")
+    w.set_title("제목")
+    w.set_clip(clip)
+    assert not w.full_mode_btn.isEnabled() and w.mode() == "clip" and w.clip_mode_btn.isChecked()
+    w.set_full_preview(_full_file(tmp_path), "sig1")
+    assert w.mode() == "full" and w.full_mode_btn.isChecked() and w.full_mode_btn.isEnabled()
+    assert w.player.videoOutput() is w.full_item and w.full_item.isVisible() and not w.square.isVisible()
+    assert not w.title_item.isVisible() and not w.caption_item.isVisible() and not w.time_item.isVisible()
+    assert not w.controls_panel.isEnabled() and w.play_btn.isEnabled() and w.seek_slider.isEnabled()
+    assert w.full_signature() == "sig1" and w.full_status.text() == "전체 미리보기 최신"
+    w.set_title("다른 제목")  # relayout이 오버레이를 다시 켜면 안 된다
+    assert not w.title_item.isVisible()
+    w.set_clip(clip)  # 전체 모드에선 행 선택이 재생을 바꾸지 않는다
+    assert w.mode() == "full" and w.clip is clip
+    w.set_mode("clip")
+    assert w.mode() == "clip" and w.player.videoOutput() is w.video_item and w.clip_mode_btn.isChecked()
+    assert w.title_item.isVisible() and w.caption_item.isVisible() and w.square.isVisible() and not w.full_item.isVisible()
+    assert w.controls_panel.isEnabled()
+
+
+def test_full_mode_seek_range_follows_duration(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    w.set_clip(make_clip(make_video(), t=758))
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    w._on_duration(125_000)
+    assert w.seek_slider.maximum() == 125_000
+    w._on_position(61_000)
+    assert w.seek_slider.value() == 61_000 and w.pos_label.text() == "1:01 / 2:05"
+
+
+def test_stale_and_clear(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    w.set_clip(make_clip(make_video(), t=758))
+    w.mark_full_preview_stale()  # 파일 없을 땐 아무 일도 없다
+    assert w.full_status.text() == ""
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    w.mark_full_preview_stale()
+    assert "다시 만들기" in w.full_status.text() and w.mode() == "full"
+    w.set_full_preview(_full_file(tmp_path), "sig2")  # 다시 만들면 최신
+    assert w.full_status.text() == "전체 미리보기 최신" and w.full_signature() == "sig2"
+    w.clear_full_preview()
+    assert w.mode() == "clip" and not w.full_mode_btn.isEnabled() and w.full_signature() is None and w.full_status.text() == ""
+
+
+def test_set_audio_mix_applies_volumes_in_full_mode(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    mix = AudioMix(original_volume=0.5, bgm_path=str(song), bgm_volume=0.2)
+    w.set_clip(make_clip(make_video(), t=758))
+    w.set_audio_mix(mix)
+    assert abs(w.audio.volume() - 1.0) < 1e-6  # 클립 모드에선 원본 100%
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    assert abs(w.audio.volume() - 0.5) < 1e-6 and abs(w.bgm_audio.volume() - 0.2) < 1e-6
+    mix.original_volume = 0.8
+    mix.bgm_volume = 0.6
+    w.set_audio_mix(mix)
+    assert abs(w.audio.volume() - 0.8) < 1e-6 and abs(w.bgm_audio.volume() - 0.6) < 1e-6
+    w.set_mode("clip")
+    assert abs(w.audio.volume() - 1.0) < 1e-6
+
+
+def test_full_preview_button_emits_request(qtbot, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    with qtbot.waitSignal(w.full_preview_requested, timeout=1000):
+        w.make_full_btn.click()
+
+
+def test_shutdown_stops_bgm_player(qtbot):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.shutdown()
+    assert w.bgm_player.source().isEmpty()
+
+
+def _sync_setup(qtbot, monkeypatch, tmp_path, bgm_state=QMediaPlayer.PlaybackState.PlayingState, bgm_pos=0):
+    """전체 모드 + 재생 중 + BGM 로드 완료 상태를 흉내 낸다. seeks에 setPosition 인자가 쌓인다."""
+    w = _widget(qtbot, monkeypatch)
+    seeks, plays, pauses = [], [], []
+    monkeypatch.setattr(w.bgm_player, "setPosition", lambda ms: seeks.append(ms))
+    monkeypatch.setattr(w.bgm_player, "play", lambda: plays.append(1))
+    monkeypatch.setattr(w.bgm_player, "pause", lambda: pauses.append(1))
+    monkeypatch.setattr(w.bgm_player, "playbackState", lambda: bgm_state)
+    monkeypatch.setattr(w.bgm_player, "position", lambda: bgm_pos)
+    monkeypatch.setattr(w.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    w.set_clip(make_clip_for_sync(w))
+    w.set_audio_mix(AudioMix(bgm_path=str(song), bgm_offset=30.0, bgm_start=10.0, bgm_end=None))
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    w._on_duration(200_000)      # 전체 미리보기 200초
+    w._on_bgm_duration(120_000)  # 곡 120초
+    seeks.clear(); plays.clear(); pauses.clear()
+    return w, seeks, plays, pauses
+
+
+def make_clip_for_sync(w):
+    from stampcut.core.models import Clip, VideoInfo
+    from datetime import datetime, timezone
+    v = VideoInfo(0, "POZWcyKFvjY", "https://youtu.be/POZWcyKFvjY", "t", "3게임", "ch", datetime(2026, 8, 20, tzinfo=timezone.utc), 1449, 4)
+    return Clip(video=v, t=758, mentions=[], score=1.0, caption="원더골")
+
+
+def test_sync_starts_bgm_at_mapped_position(qtbot, monkeypatch, tmp_path):
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path, bgm_state=QMediaPlayer.PlaybackState.StoppedState)
+    w._sync_bgm(15_000)  # 영상 15초 = 구간 5초 → 곡 35초
+    assert seeks == [35_000] and plays == [1] and pauses == []
+
+
+def test_sync_pauses_outside_section_and_in_clip_mode(qtbot, monkeypatch, tmp_path):
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path)
+    w._sync_bgm(5_000)  # bgm_start(10초) 이전
+    assert pauses == [1] and seeks == []
+    w.set_mode("clip")
+    pauses.clear()
+    w._sync_bgm(15_000)
+    assert pauses == [1] and seeks == []
+
+
+def test_sync_reseeks_only_beyond_drift_and_after_cooldown(qtbot, monkeypatch, tmp_path):
+    from stampcut.gui import preview_widget as pw
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path, bgm_pos=35_000)
+    w._sync_bgm(15_100)  # 목표 35.1초, 오차 100ms → 유지
+    assert seeks == []
+    clock = [1000.0]
+    monkeypatch.setattr(pw.time, "monotonic", lambda: clock[0])
+    w._sync_bgm(16_000)  # 목표 36초, 오차 1000ms → 재동기
+    assert seeks == [36_000]
+    clock[0] += 0.1
+    w._sync_bgm(16_100)  # 100ms 뒤, seek 착지 전 → 쿨다운으로 재시도 안 함
+    assert seeks == [36_000]
+    clock[0] += 1.0
+    w._sync_bgm(17_200)  # 쿨다운 지남, 오차 여전히 큼 → 재동기
+    assert seeks == [36_000, 37_200]
+
+
+def test_position_tick_in_full_mode_drives_sync(qtbot, monkeypatch, tmp_path):
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path, bgm_state=QMediaPlayer.PlaybackState.StoppedState)
+    w._on_position(20_000)
+    assert seeks == [40_000] and plays == [1]
+
+
+def test_pause_and_playback_started_signal(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    started = []
+    w.playback_started.connect(lambda: started.append(1))
+    w.set_clip(make_clip(make_video(), t=758))  # preview_path 없음 → 재생 안 함
+    assert started == []
+    w.set_full_preview(_full_file(tmp_path), "sig")  # 전체 모드 진입 = 재생 시작
+    assert started == [1]
+    monkeypatch.setattr(w.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState)
+    pauses = []
+    monkeypatch.setattr(w.player, "pause", lambda: pauses.append("video"))
+    monkeypatch.setattr(w.bgm_player, "pause", lambda: pauses.append("bgm"))
+    w.pause()
+    assert pauses == ["video", "bgm"] and w.play_btn.text() == "▶ 재생"

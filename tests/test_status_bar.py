@@ -5,7 +5,8 @@ from stampcut.gui.status_bar import StatusPanel, overall_percent
 def test_overall_percent():
     assert overall_percent("download", 1, 4) == 10
     assert overall_percent("render", 150, 300) == 65
-    assert overall_percent("concat", 1, 1) == 100
+    assert overall_percent("concat", 1, 1) == 95
+    assert overall_percent("mix", 1, 1) == 100
     assert overall_percent("preview", 2, 4) == 50
     assert overall_percent("analyze", 0, 0) == 0
 

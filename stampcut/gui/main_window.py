@@ -29,6 +29,7 @@ from stampcut.core.ffmpeg import find_ffmpeg
 from stampcut.core.models import Clip, ClipStatus, Project, Settings
 from stampcut.core.renderer import unique_output_path
 from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
+from stampcut.gui.bgm_panel import BgmPanel
 from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME, ClipTableModel, SecondsDelegate
 from stampcut.gui.preview_widget import PreviewWidget, load_font_family
 from stampcut.gui.settings_dialog import SettingsDialog
@@ -60,6 +61,7 @@ def _analyze_job(urls, title, settings, client, progress, cancel):
 class MainWindow(QMainWindow):
     analysis_done = Signal()
     render_done = Signal(object)
+    full_preview_done = Signal(object)
 
     def __init__(self, settings: Settings | None = None, project_file: Path | None = None) -> None:
         super().__init__()
@@ -115,6 +117,16 @@ class MainWindow(QMainWindow):
         self.preview = PreviewWidget(self.settings, load_font_family(settings_mod.resolve_font(self.settings)))
         self.preview.clip_changed.connect(self._on_clip_edited)
         self.preview.style_changed.connect(self._on_style_changed)
+        self.preview.full_preview_requested.connect(self.start_full_preview)
+        self.preview.bgm_error.connect(lambda msg: self.status_panel.set_idle(f"BGM 재생 불가: {msg}"))
+
+        self.bgm_panel = BgmPanel()
+        self.bgm_panel.set_bgm_dir(self.settings.bgm_dir)
+        self.bgm_panel.changed.connect(self._on_audio_changed)
+        self.bgm_panel.bgm_dir_changed.connect(self._on_bgm_dir_changed)
+        # BGM만 듣기와 미리보기 재생은 동시에 소리 내지 않는다
+        self.preview.playback_started.connect(self.bgm_panel.stop)
+        self.bgm_panel.listen_btn.toggled.connect(self._on_listen_toggled)
 
         self.status_panel = StatusPanel()
         self.status_panel.render_requested.connect(self.start_render)
@@ -133,17 +145,21 @@ class MainWindow(QMainWindow):
         style_box = QGroupBox("세부 설정")
         QVBoxLayout(style_box).addWidget(self.preview.controls_panel)
         left_layout.addWidget(style_box)
+        left_layout.addWidget(self.bgm_panel)
         left_layout.addWidget(self.table, 1)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left)
-        splitter.addWidget(self.preview)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([460, 820])
+        # 처음엔 편집 영역과 미리보기를 반반으로 두고, 창을 키우면(최대화) 미리보기만 넓어진다.
+        # 최소 폭(왼쪽 420 / 미리보기 430)은 버튼 행이 깨지지 않는 하한이다. 경계선은 드래그로 조절 가능.
+        self.preview.setMinimumWidth(430)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(left)
+        self.splitter.addWidget(self.preview)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([640, 640])
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self.splitter, 1)
         layout.addWidget(self.status_panel)
         self.setCentralWidget(central)
 
@@ -171,10 +187,13 @@ class MainWindow(QMainWindow):
         self.preview.set_settings(s)
         self.status_panel.set_output_dir(settings_mod.resolve_output_dir(s))
         self.status_panel.update_summary(self.project, s)
+        self.bgm_panel.set_bgm_dir(s.bgm_dir)
+        self._check_full_preview()
 
     def _on_style_changed(self) -> None:
         # PreviewWidget이 공유 Settings 객체를 직접 고쳤으므로 저장만 하면 된다
         settings_mod.save(self.settings)
+        self._check_full_preview()
 
     # --- 분석 ---
     def start_analysis(self) -> None:
@@ -217,6 +236,9 @@ class MainWindow(QMainWindow):
         self.url_panel.set_title(project.title)
         self.model.set_clips(project.clips)
         self.preview.set_title(project.title)
+        self.bgm_panel.set_mix(project.audio)
+        self.preview.set_audio_mix(project.audio)
+        self.preview.clear_full_preview()
         self.status_panel.update_summary(project, self.settings)
         if project.clips:
             self.table.selectRow(0)
@@ -276,6 +298,7 @@ class MainWindow(QMainWindow):
         self.status_panel.update_summary(self.project, self.settings)
         if self.project and clip.status is ClipStatus.READY and not preview_covers(clip, self.settings):
             self.start_previews([clip])
+        self._check_full_preview()
         self._schedule_autosave()
 
     def _on_table_changed(self) -> None:
@@ -283,12 +306,14 @@ class MainWindow(QMainWindow):
         clip = self._selected_clip()
         if clip is not None and self.preview.clip is clip:
             self.preview.sync_from_clip()
+        self._check_full_preview()
         self._schedule_autosave()
 
     def _on_title_changed(self, text: str) -> None:
         if self.project:
             self.project.title = text
         self.preview.set_title(text)
+        self._check_full_preview()
         self._schedule_autosave()
 
     def _on_urls_changed(self) -> None:
@@ -299,6 +324,54 @@ class MainWindow(QMainWindow):
     def _on_output_dir_changed(self, d: str) -> None:
         self.settings.output_dir = d
         settings_mod.save(self.settings)
+
+    def _on_audio_changed(self) -> None:
+        if self.project:
+            self.preview.set_audio_mix(self.project.audio)
+            self._schedule_autosave()
+
+    def _on_listen_toggled(self, on: bool) -> None:
+        # 패널이 파일 없음 등으로 곧바로 되돌린 경우(재진입 setChecked(False))는 미리보기를 건드리지 않는다
+        if on and self.bgm_panel.listen_btn.isChecked():
+            self.preview.pause()
+
+    def _on_bgm_dir_changed(self, d: str) -> None:
+        self.settings.bgm_dir = d
+        settings_mod.save(self.settings)
+
+    def _check_full_preview(self) -> None:
+        sig = self.preview.full_signature()
+        if sig is not None and self.project and sig != pipeline.preview_signature(self.project, self.settings):
+            self.preview.mark_full_preview_stale()
+
+    # --- 전체 미리보기 ---
+    def start_full_preview(self) -> None:
+        if not self.project or not self.project.enabled_clips():
+            self._warn("켜진 클립이 없습니다.")
+            return
+        if self.ffpaths is None:
+            self._warn(FFMPEG_MISSING)
+            return
+        self._set_busy(True)
+        self.status_panel.set_idle("전체 미리보기 만드는 중")
+        w = Worker(pipeline.render_preview, self.project, self.settings, self.ffpaths)
+        w.signals.finished.connect(self._on_full_preview_done)
+        w.signals.failed.connect(self._on_full_preview_failed)
+        w.signals.cancelled.connect(lambda: self._set_busy(False))
+        self._start(w)
+
+    def _on_full_preview_done(self, path: Path) -> None:
+        self._set_busy(False)
+        assert self.project is not None
+        self.preview.set_full_preview(path, pipeline.preview_signature(self.project, self.settings))
+        self.status_panel.set_idle("전체 미리보기 준비됨 — BGM을 조절해 보세요")
+        self.full_preview_done.emit(path)
+
+    def _on_full_preview_failed(self, msg: str) -> None:
+        self._set_busy(False)
+        self.status_panel.set_idle("전체 미리보기 실패")
+        hint = "\n\n표에서 해당 행을 우클릭 → 미리보기 다시 받기 후 다시 시도하세요." if "준비되지 않은" in msg else ""
+        self._warn(f"전체 미리보기를 만들지 못했습니다.\n{msg}{hint}")
 
     # --- 렌더 ---
     def start_render(self) -> None:
@@ -311,6 +384,10 @@ class MainWindow(QMainWindow):
             return
         if any(c.duration(self.settings) < 1 for c in self.project.enabled_clips()):
             self._warn("길이가 0초인 클립이 있습니다. 앞/뒤 초를 확인하세요.")
+            return
+        audio = self.project.audio
+        if audio.has_bgm() and not Path(audio.bgm_path).is_file():
+            self._warn(f"배경 음악 파일을 찾을 수 없습니다:\n{audio.bgm_path}")
             return
         broken = [c for c in self.project.enabled_clips() if c.status is ClipStatus.ERROR]
         if broken:
@@ -381,12 +458,15 @@ class MainWindow(QMainWindow):
         self.status_panel.set_progress(stage, done, total, message)
 
     def _set_busy(self, busy: bool) -> None:
+        if busy:
+            self.preview.pause()  # 렌더/전체 미리보기 생성 중에는 미리보기(와 BGM 동기 재생)도 멈춘다
         self.url_panel.set_busy(busy)
         self.status_panel.set_busy(busy)
         self.table.setEnabled(not busy)
         self.preview.setEnabled(not busy)
-        self.preview.controls_panel.setEnabled(not busy)
+        self.preview.controls_panel.setEnabled(not busy and self.preview.mode() == "clip")
         self.settings_action.setEnabled(not busy)
+        self.bgm_panel.set_busy(busy)
 
     def _schedule_autosave(self) -> None:
         if self.project_file is not None and self.project is not None:
@@ -420,5 +500,6 @@ class MainWindow(QMainWindow):
             for w in active:  # 시간 안에 안 끝난 워커가 뒤늦게 시그널로 죽은 위젯을 건드리지 않도록
                 w.signals.blockSignals(True)
         self._flush_autosave()
+        self.bgm_panel.stop()
         self.preview.shutdown()
         event.accept()
