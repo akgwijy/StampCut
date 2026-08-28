@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
 
 from stampcut.core import channel as channel_mod
 from stampcut.core.models import ChannelInfo, RawComment, VideoInfo
-from stampcut.core.timestamps import comment_has_timestamp
 from stampcut.core.youtube_api import ApiKeyError, ChannelNotFound, QuotaError, parse_channel_ref
 from stampcut.gui.channel_models import V_TITLE, ChannelVideoModel, CommentModel
 from stampcut.gui.workers import Worker
@@ -52,6 +51,7 @@ class ChannelDialog(QDialog):
         self.resize(1100, 700)
         self.pool = QThreadPool.globalInstance()
         self._worker: Worker | None = None
+        self._workers: list[Worker] = []  # 실행 중/최근 워커 (setAutoDelete(False)라 참조를 쥐고 있어야 한다)
         self._channel: ChannelInfo | None = None
         self._next_token: str | None = None
         self._comment_cache: dict[str, list[RawComment]] = {}
@@ -143,7 +143,7 @@ class ChannelDialog(QDialog):
         w = Worker(_job, channel_mod.find_channel_videos, self.client, text, limit=self.limit, page_token=token, channel=self._channel)
         w.signals.finished.connect(self._on_page)
         w.signals.failed.connect(self._on_failed)
-        w.signals.cancelled.connect(lambda: self._set_busy(False))
+        w.signals.cancelled.connect(self._on_cancelled)
         self._run(w)
 
     def _on_page(self, page) -> None:
@@ -153,6 +153,7 @@ class ChannelDialog(QDialog):
         more = " (더 보기 가능)" if page.next_token else ""
         self.status.setText(f"{page.channel.title} — 댓글 있는 영상 {self.video_model.rowCount()}개{more}")
         self.page_loaded.emit(page)
+        self._run_pending()
 
     # --- 댓글 ---
     def _on_video_selected(self, current, _previous) -> None:
@@ -172,14 +173,14 @@ class ChannelDialog(QDialog):
         w = Worker(_job, channel_mod.load_comments, self.client, video)
         w.signals.finished.connect(lambda comments, v=video: self._on_comments(v, comments))
         w.signals.failed.connect(self._on_failed)
-        w.signals.cancelled.connect(lambda: self._set_busy(False))
+        w.signals.cancelled.connect(self._on_cancelled)
         self._run(w)
 
     def _on_comments(self, video: VideoInfo, comments: list) -> None:
         self._set_busy(False)
         self._comment_cache[video.video_id] = comments
-        self.video_model.set_timestamp_count(video.video_id, sum(1 for c in comments if comment_has_timestamp(c, video)))
         self._show_comments(video, comments)
+        self.video_model.set_timestamp_count(video.video_id, self.comment_model.timestamp_count())
         self.comments_loaded.emit(video)
         self._run_pending()
 
@@ -201,6 +202,8 @@ class ChannelDialog(QDialog):
 
     # --- 공통 ---
     def _run(self, w: Worker) -> None:
+        self._workers = [x for x in self._workers if not x.done]
+        self._workers.append(w)
         self._worker = w
         self._set_busy(True)
         w.signals.progress.connect(lambda stage, done, total, msg: self.status.setText(msg))
@@ -211,9 +214,13 @@ class ChannelDialog(QDialog):
         self.ref_edit.setEnabled(not busy)
         self.more_btn.setEnabled(not busy and self._next_token is not None)
 
+    def _on_cancelled(self) -> None:
+        self._pending_video = None
+        self._set_busy(False)
+
     def _on_failed(self, msg: str) -> None:
         self._set_busy(False)
-        self.status.setText(msg.splitlines()[0])
+        self.status.setText(msg.splitlines()[0] if msg.strip() else "알 수 없는 오류")
         QMessageBox.warning(self, "채널 영상 찾기", msg)
         self._run_pending()
 
@@ -226,7 +233,12 @@ class ChannelDialog(QDialog):
             self.urls_selected.emit(urls)
 
     def closeEvent(self, event) -> None:
-        if self.busy():  # 진행 중 워커가 닫힌 창을 건드리지 않도록 (메인 창과 같은 패턴)
-            self._worker.cancel.set()
-            self._worker.signals.blockSignals(True)
+        # 진행 중 워커가 닫힌 창을 건드리지 않도록 취소·차단하고, 다시 열 때 잠겨 있지 않게 상태를 되돌린다
+        for w in self._workers:
+            if not w.done:
+                w.cancel.set()
+                w.signals.blockSignals(True)
+        self._worker = None
+        self._pending_video = None
+        self._set_busy(False)
         super().closeEvent(event)

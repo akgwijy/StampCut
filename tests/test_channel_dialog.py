@@ -1,5 +1,7 @@
+import threading
 from datetime import datetime, timezone
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
@@ -136,3 +138,71 @@ def test_channel_not_found_warns_and_reenables(qtbot, monkeypatch):
     assert warned[0] == "채널을 찾을 수 없습니다: @nobody"
     qtbot.waitUntil(lambda: dlg.find_btn.isEnabled(), timeout=5000)
     assert dlg.status.text() == "채널을 찾을 수 없습니다: @nobody" and not dlg.more_btn.isEnabled()
+
+
+def _slow_pages(client, gate, page_token_to_block):
+    """지정한 페이지 요청을 gate가 열릴 때까지 막는다 (워커가 진행 중인 상태를 만든다)."""
+    original = client.fetch_channel_videos
+
+    def slow(ch, limit=200, page_token=None):
+        if page_token == page_token_to_block:
+            gate.wait(5)
+        return original(ch, limit, page_token)
+
+    client.fetch_channel_videos = slow
+
+
+def test_row_selected_during_more_loads_after_page(qtbot):
+    client = _client()
+    gate = threading.Event()
+    _slow_pages(client, gate, "P2")
+    dlg = _dialog(qtbot, client)
+    _find(qtbot, dlg)
+    dlg.more_btn.click()  # 페이지 워커가 gate에 막혀 진행 중
+    assert dlg.busy()
+    dlg.videos.selectRow(0)  # busy → pending으로 기억
+    assert dlg.comment_model.rowCount() == 0
+    with qtbot.waitSignal(dlg.comments_loaded, timeout=5000):
+        gate.set()  # 페이지 완료 → pending 영상을 이어서 로드
+    assert dlg.video_model.rowCount() == 3 and dlg.comment_model.rowCount() == 2
+    assert dlg.status.text() == "1게임: 댓글 2개, 타임스탬프 1개"
+    assert [c for c in client.calls if c[0] == "comments"] == [("comments", A)]
+
+
+def test_close_during_load_reenables_on_reopen(qtbot):
+    client = _client()
+    gate = threading.Event()
+    _slow_pages(client, gate, None)
+    dlg = _dialog(qtbot, client)
+    dlg.ref_edit.setText("@moonsungfc")
+    dlg.find()
+    assert dlg.busy() and not dlg.find_btn.isEnabled()
+    old = dlg._worker
+    dlg.close()
+    assert not dlg.busy() and dlg.find_btn.isEnabled() and dlg.ref_edit.isEnabled()
+    gate.set()
+    qtbot.waitUntil(lambda: old.done, timeout=5000)  # 차단된 워커가 끝나도 창 상태는 그대로
+    assert dlg.video_model.rowCount() == 0 and dlg.find_btn.isEnabled()
+
+
+def test_workers_are_kept_until_done(qtbot):
+    dlg = _dialog(qtbot)
+    _find(qtbot, dlg)
+    with qtbot.waitSignal(dlg.comments_loaded, timeout=5000):
+        dlg.videos.selectRow(0)
+    assert all(w.done for w in dlg._workers) and len(dlg._workers) >= 1
+
+
+def test_job_maps_api_errors_to_user_messages():
+    from stampcut.core.youtube_api import ApiKeyError, QuotaError
+    from stampcut.gui.channel_dialog import _job
+
+    def boom(exc, progress, cancel):
+        raise exc
+
+    with pytest.raises(RuntimeError, match="API 키"):
+        _job(boom, ApiKeyError("bad"), progress=None, cancel=None)
+    with pytest.raises(RuntimeError, match="할당량"):
+        _job(boom, QuotaError("q"), progress=None, cancel=None)
+    with pytest.raises(RuntimeError, match="채널을 찾을 수 없습니다: @x"):
+        _job(boom, ChannelNotFound("@x"), progress=None, cancel=None)
