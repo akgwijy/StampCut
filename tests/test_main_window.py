@@ -524,3 +524,16 @@ def test_every_stale_hook_marks_preview(qtbot, tmp_path, monkeypatch, make_video
     else:
         w.apply_settings(replace(w.settings, caption_color="#123456"))
     assert "다시 만들기" in w.preview.full_status.text()
+
+
+def test_video_and_settings_split_half_and_half(qtbot):
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.waitExposed(w)
+    left, preview = w.splitter.widget(0), w.splitter.widget(1)
+    assert left is w.url_panel.parentWidget() and preview is w.preview
+    a, b = w.splitter.sizes()
+    assert abs(a - b) <= 2  # 편집 영역과 미리보기가 반반
+    assert left.sizePolicy().horizontalStretch() == preview.sizePolicy().horizontalStretch() == 1  # 창을 키워도 같은 비율
+    assert left.minimumWidth() == 420 and preview.minimumWidth() == 430  # 줄여도 버튼 행이 깨지지 않는 최소 폭

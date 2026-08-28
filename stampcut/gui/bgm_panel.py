@@ -122,6 +122,9 @@ class BgmPanel(QGroupBox):
         spin.setSingleStep(0.5)
         spin.setSuffix("초")
         spin.setKeyboardTracking(False)
+        # 최소 폭이 없으면 한 행에 위젯이 많을 때 값이 화살표 버튼에 가려 보이지 않는다.
+        # "3600.0초"와 특수값 "끝까지"가 모두 들어갈 폭으로 잡는다
+        spin.setMinimumWidth(96)
         return spin
 
     # --- 외부 API ---

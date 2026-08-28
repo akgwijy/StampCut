@@ -148,15 +148,18 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.bgm_panel)
         left_layout.addWidget(self.table, 1)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left)
-        splitter.addWidget(self.preview)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([460, 820])
+        # 편집 영역과 미리보기를 반반으로. 창을 키우거나 줄여도 같은 비율을 유지하고,
+        # 최소 폭(왼쪽 420 / 미리보기 430)은 버튼 행이 깨지지 않는 하한이다.
+        self.preview.setMinimumWidth(430)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(left)
+        self.splitter.addWidget(self.preview)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([640, 640])
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self.splitter, 1)
         layout.addWidget(self.status_panel)
         self.setCentralWidget(central)
 
