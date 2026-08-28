@@ -3,6 +3,7 @@ from pathlib import Path
 from stampcut.core.ffmpeg import FfmpegPaths, ProbeInfo
 from stampcut.core.models import Settings
 from stampcut.core.renderer import (
+    PREVIEW_PROFILE,
     build_clip_command,
     build_concat_command,
     ff_color,
@@ -110,3 +111,27 @@ def test_style_y_clamped_to_canvas(tmp_path, make_video, make_clip):
     s = Settings(title_y=-50, caption_y=99999)
     fc = filter_complex(build(tmp_path, make_clip(make_video(), t=758), s)[0])
     assert "y=0-text_h/2" in fc and "y=1920" in fc and "y=1878" in fc
+
+
+def test_preview_profile_scales_layout_and_speeds_encode(tmp_path, make_video, make_clip):
+    clip = make_clip(make_video(), t=758, caption="원더골")
+    clip.preview_path = tmp_path / "preview.mp4"
+    cmd, out = build_clip_command(
+        paths(tmp_path), clip, Settings(), "제목", probe(), tmp_path, 3, tmp_path / "font.otf",
+        profile=PREVIEW_PROFILE, source=clip.preview_path, in_offset=7,
+    )
+    fc = filter_complex(cmd)
+    assert cmd[cmd.index("-ss") + 1] == "7" and cmd.index("-ss") < cmd.index("-i")
+    assert cmd[cmd.index("-i") + 1] == str(clip.preview_path)
+    assert out == tmp_path / "clip_003.mp4"
+    assert "crop=540:540" in fc and "s=540x960" in fc and "overlay=0:210" in fc
+    assert "fontsize=32" in fc and "fontsize=18" in fc and "fontsize=30" in fc
+    assert "y=105-text_h/2" in fc and "y=755" in fc and "y=776" in fc and "borderw=2" in fc
+    assert cmd[cmd.index("-preset") + 1] == "ultrafast" and cmd[cmd.index("-crf") + 1] == "28"
+    assert (tmp_path / "clip_003_caption.txt").read_text("utf-8") == "원더골"
+
+
+def test_default_profile_has_no_seek_and_uses_final_path(tmp_path, make_video, make_clip):
+    cmd, _ = build(tmp_path, make_clip(make_video(), t=758))
+    assert "-ss" not in cmd and cmd[cmd.index("-i") + 1] == str(tmp_path / "final.mp4")
+    assert cmd[cmd.index("-preset") + 1] == "medium"
