@@ -534,6 +534,9 @@ def test_video_and_settings_split_half_and_half(qtbot):
     left, preview = w.splitter.widget(0), w.splitter.widget(1)
     assert left is w.url_panel.parentWidget() and preview is w.preview
     a, b = w.splitter.sizes()
-    assert abs(a - b) <= 2  # 편집 영역과 미리보기가 반반
-    assert left.sizePolicy().horizontalStretch() == preview.sizePolicy().horizontalStretch() == 1  # 창을 키워도 같은 비율
+    assert abs(a - b) <= 40  # 처음엔 편집 영역과 미리보기가 (레이아웃 여백 오차 안에서) 반반
     assert left.minimumWidth() == 420 and preview.minimumWidth() == 430  # 줄여도 버튼 행이 깨지지 않는 최소 폭
+    w.resize(w.width() + 400, w.height())  # 최대화처럼 창이 넓어지면
+    qtbot.waitUntil(lambda: w.splitter.sizes()[1] > b, timeout=2000)
+    a2, b2 = w.splitter.sizes()
+    assert a2 == a and b2 >= b + 390  # 왼쪽은 그대로, 미리보기만 커진다
