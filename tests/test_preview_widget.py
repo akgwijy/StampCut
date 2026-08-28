@@ -2,7 +2,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QGraphicsScene
 
-from stampcut.core.models import Settings
+from stampcut.core.models import AudioMix, Settings
 from stampcut.core.renderer import compute_square_geometry
 from stampcut.gui.preview_widget import PreviewWidget, _DragView, pan_after_drag, seek_target, video_item_placement
 
@@ -272,3 +272,97 @@ def test_on_position_leaves_slider_alone_while_user_drags(qtbot, make_video, mak
     w.seek_slider.setSliderDown(False)
     w._on_position(58000)
     assert w.seek_slider.value() == 3000
+
+
+def _full_file(tmp_path):
+    p = tmp_path / "full_x.mp4"
+    p.write_bytes(b"x")
+    return p
+
+
+def _widget(qtbot, monkeypatch):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    # 가짜 파일을 실제로 열지 않는다
+    monkeypatch.setattr(w.player, "setSource", lambda url: None)
+    monkeypatch.setattr(w.player, "play", lambda: None)
+    monkeypatch.setattr(w.bgm_player, "setSource", lambda url: None)
+    monkeypatch.setattr(w.bgm_player, "play", lambda: None)
+    return w
+
+
+def test_full_mode_switches_output_and_hides_overlays(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    clip = make_clip(make_video(), t=758, caption="원더골")
+    w.set_title("제목")
+    w.set_clip(clip)
+    assert not w.full_mode_btn.isEnabled() and w.mode() == "clip" and w.clip_mode_btn.isChecked()
+    w.set_full_preview(_full_file(tmp_path), "sig1")
+    assert w.mode() == "full" and w.full_mode_btn.isChecked() and w.full_mode_btn.isEnabled()
+    assert w.player.videoOutput() is w.full_item and w.full_item.isVisible() and not w.square.isVisible()
+    assert not w.title_item.isVisible() and not w.caption_item.isVisible() and not w.time_item.isVisible()
+    assert not w.controls_panel.isEnabled() and w.play_btn.isEnabled() and w.seek_slider.isEnabled()
+    assert w.full_signature() == "sig1" and w.full_status.text() == "전체 미리보기 최신"
+    w.set_title("다른 제목")  # relayout이 오버레이를 다시 켜면 안 된다
+    assert not w.title_item.isVisible()
+    w.set_clip(clip)  # 전체 모드에선 행 선택이 재생을 바꾸지 않는다
+    assert w.mode() == "full" and w.clip is clip
+    w.set_mode("clip")
+    assert w.mode() == "clip" and w.player.videoOutput() is w.video_item and w.clip_mode_btn.isChecked()
+    assert w.title_item.isVisible() and w.caption_item.isVisible() and w.square.isVisible() and not w.full_item.isVisible()
+    assert w.controls_panel.isEnabled()
+
+
+def test_full_mode_seek_range_follows_duration(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    w.set_clip(make_clip(make_video(), t=758))
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    w._on_duration(125_000)
+    assert w.seek_slider.maximum() == 125_000
+    w._on_position(61_000)
+    assert w.seek_slider.value() == 61_000 and w.pos_label.text() == "1:01 / 2:05"
+
+
+def test_stale_and_clear(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    w.set_clip(make_clip(make_video(), t=758))
+    w.mark_full_preview_stale()  # 파일 없을 땐 아무 일도 없다
+    assert w.full_status.text() == ""
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    w.mark_full_preview_stale()
+    assert "다시 만들기" in w.full_status.text() and w.mode() == "full"
+    w.set_full_preview(_full_file(tmp_path), "sig2")  # 다시 만들면 최신
+    assert w.full_status.text() == "전체 미리보기 최신" and w.full_signature() == "sig2"
+    w.clear_full_preview()
+    assert w.mode() == "clip" and not w.full_mode_btn.isEnabled() and w.full_signature() is None and w.full_status.text() == ""
+
+
+def test_set_audio_mix_applies_volumes_in_full_mode(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    mix = AudioMix(original_volume=0.5, bgm_path=str(song), bgm_volume=0.2)
+    w.set_clip(make_clip(make_video(), t=758))
+    w.set_audio_mix(mix)
+    assert abs(w.audio.volume() - 1.0) < 1e-6  # 클립 모드에선 원본 100%
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    assert abs(w.audio.volume() - 0.5) < 1e-6 and abs(w.bgm_audio.volume() - 0.2) < 1e-6
+    mix.original_volume = 0.8
+    mix.bgm_volume = 0.6
+    w.set_audio_mix(mix)
+    assert abs(w.audio.volume() - 0.8) < 1e-6 and abs(w.bgm_audio.volume() - 0.6) < 1e-6
+    w.set_mode("clip")
+    assert abs(w.audio.volume() - 1.0) < 1e-6
+
+
+def test_full_preview_button_emits_request(qtbot, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    with qtbot.waitSignal(w.full_preview_requested, timeout=1000):
+        w.make_full_btn.click()
+
+
+def test_shutdown_stops_bgm_player(qtbot):
+    w = PreviewWidget(Settings(), "Malgun Gothic")
+    qtbot.addWidget(w)
+    w.shutdown()
+    assert w.bgm_player.source().isEmpty()
