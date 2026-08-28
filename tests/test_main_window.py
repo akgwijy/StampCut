@@ -1,6 +1,6 @@
 import pytest
 
-from stampcut.core.models import Project, Settings
+from stampcut.core.models import AudioMix, Project, Settings
 from stampcut.gui import main_window
 from stampcut.gui.main_window import MainWindow
 
@@ -316,3 +316,141 @@ def test_every_edit_hook_schedules_autosave(qtbot, tmp_path, monkeypatch, make_v
         w._render_candidates = {clip.id}
         w._on_rendered(out)
     assert w._autosave_timer.isActive()
+
+
+def test_bgm_panel_wired_to_project_and_autosave(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)
+    project, clip = _project_with_clip(make_video, make_clip)
+    w = MainWindow(Settings(api_key="TEST"), project_file=tmp_path / "project.json")
+    qtbot.addWidget(w)
+    assert not w.bgm_panel.isEnabled()
+    assert w.bgm_panel.parentWidget() is w.url_panel.parentWidget()  # 왼쪽 열
+    w._adopt_project(project)
+    assert w.bgm_panel.isEnabled() and w.bgm_panel.mix is project.audio
+    w._autosave_timer.stop()
+    with qtbot.waitSignal(w.bgm_panel.changed, timeout=1000):
+        w.bgm_panel.original_slider.setValue(50)
+    assert project.audio.original_volume == 0.5 and w._autosave_timer.isActive()
+    assert w.preview.audio_mix is project.audio
+
+
+def test_bgm_dir_change_saves_settings(qtbot, tmp_path, monkeypatch):
+    saved = []
+    monkeypatch.setattr(main_window.settings_mod, "save", lambda s, path=None: saved.append(s.bgm_dir))
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.bgm_panel.bgm_dir_changed.emit(str(tmp_path))
+    assert w.settings.bgm_dir == str(tmp_path) and saved == [str(tmp_path)]
+
+
+def test_full_preview_flow_and_stale_marking(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    from stampcut.core.ffmpeg import FfmpegPaths
+
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)
+    project, clip = _project_with_clip(make_video, make_clip)
+    full = tmp_path / "full_1.mp4"
+
+    def fake_render_preview(proj, s, paths, progress, cancel):
+        progress("preview_render", 100, 100, "합치는 중")
+        full.write_bytes(b"x")
+        return full
+
+    monkeypatch.setattr(main_window.pipeline, "render_preview", fake_render_preview)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    monkeypatch.setattr(w.preview.player, "setSource", lambda url: None)
+    monkeypatch.setattr(w.preview.player, "play", lambda: None)
+    w.ffpaths = FfmpegPaths(tmp_path / "ffmpeg.exe", tmp_path / "ffprobe.exe")
+    w._adopt_project(project)
+    with qtbot.waitSignal(w.full_preview_done, timeout=5000):
+        w.preview.make_full_btn.click()
+    assert w.preview.mode() == "full"
+    assert w.preview.full_signature() == main_window.pipeline.preview_signature(project, w.settings)
+    assert w.bgm_panel.isEnabled() and not w.preview.controls_panel.isEnabled()  # busy 해제 후에도 전체 모드에선 편집 잠금
+    assert "준비됨" in w.status_panel.message.text()
+    clip.caption = "바뀐 자막"
+    w._on_clip_edited(clip)
+    assert "다시 만들기" in w.preview.full_status.text()
+    w._adopt_project(_project_with_clip(make_video, make_clip)[0])  # 새 분석 → 전체 미리보기 해제
+    assert w.preview.mode() == "clip" and w.preview.full_signature() is None
+
+
+def test_full_preview_failure_warns_with_hint(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    from PySide6.QtWidgets import QMessageBox
+
+    from stampcut.core.ffmpeg import FfmpegPaths
+
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+
+    def failing(proj, s, paths, progress, cancel):
+        raise ValueError("미리보기가 준비되지 않은 클립: 3게임 12:38")
+
+    monkeypatch.setattr(main_window.pipeline, "render_preview", failing)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.ffpaths = FfmpegPaths(tmp_path / "ffmpeg.exe", tmp_path / "ffprobe.exe")
+    w._adopt_project(_project_with_clip(make_video, make_clip)[0])
+    w.start_full_preview()
+    qtbot.waitUntil(lambda: bool(warned), timeout=5000)
+    assert "12:38" in warned[0] and "다시 받기" in warned[0]
+    assert w.bgm_panel.isEnabled()  # busy 해제됨
+
+
+def test_full_preview_refused_without_clips_or_ffmpeg(qtbot, monkeypatch, make_video, make_clip):
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    started = []
+    monkeypatch.setattr(main_window.pipeline, "render_preview", lambda *a, **k: started.append(1))
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.start_full_preview()
+    assert len(warned) == 1 and "클립" in warned[0]
+    w.ffpaths = None
+    _load_project(w, _project_with_clip(make_video, make_clip)[0])
+    w.start_full_preview()
+    assert len(warned) == 2 and "ffmpeg" in warned[1] and started == []
+
+
+def test_render_refuses_missing_bgm_file(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    from PySide6.QtWidgets import QMessageBox
+
+    from stampcut.core.ffmpeg import FfmpegPaths
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    rendered = []
+    monkeypatch.setattr(main_window.pipeline, "render", lambda *a, **k: rendered.append(1))
+    project, _ = _project_with_clip(make_video, make_clip)
+    project.audio = AudioMix(bgm_path=str(tmp_path / "gone.mp3"))
+    w = MainWindow(Settings(api_key="TEST", output_dir=str(tmp_path / "out")))
+    qtbot.addWidget(w)
+    w.ffpaths = FfmpegPaths(tmp_path / "ffmpeg.exe", tmp_path / "ffprobe.exe")
+    _load_project(w, project)
+    w.start_render()
+    assert warned and "배경 음악" in warned[0] and rendered == []
+
+
+def test_restore_fills_bgm_panel_and_busy_locks_it(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)
+    pf = tmp_path / "project.json"
+    project, _ = _project_with_clip(make_video, make_clip)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    project.audio = AudioMix(bgm_path=str(song), bgm_volume=0.4, bgm_offset=12.0)
+    w = MainWindow(Settings(api_key="TEST"), project_file=pf)
+    qtbot.addWidget(w)
+    w._adopt_project(project)
+    w._flush_autosave()
+    w2 = MainWindow(Settings(api_key="TEST"), project_file=pf)
+    qtbot.addWidget(w2)
+    assert w2.project.audio == project.audio
+    assert w2.bgm_panel.file_combo.currentText() == "song.mp3" and w2.bgm_panel.bgm_slider.value() == 40
+    assert w2.bgm_panel.offset_spin.value() == 12.0
+    w2._set_busy(True)
+    assert not w2.bgm_panel.isEnabled()
+    w2._set_busy(False)
+    assert w2.bgm_panel.isEnabled()
