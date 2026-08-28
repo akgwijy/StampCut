@@ -1,7 +1,7 @@
 import pytest
 
 from stampcut.core.models import RawComment
-from stampcut.core.timestamps import extract_mentions, find_timestamps, format_time
+from stampcut.core.timestamps import comment_has_timestamp, extract_mentions, find_timestamps, first_timestamp, format_time
 
 
 def comment(text, **kw):
@@ -77,3 +77,16 @@ def test_format_time():
     assert format_time(425) == "7:05"
     assert format_time(3753) == "1:02:33"
     assert format_time(0) == "0:00"
+
+
+def _c(text):
+    return RawComment("c", text, "@a", 0, False)
+
+
+def test_first_timestamp_and_has_timestamp(make_video):
+    v = make_video(duration=1449)
+    assert first_timestamp(_c("잘 봤어요\n원더골 12:38 그리고 7:05"), v) == 758  # 첫 줄에 없으면 다음 줄, 줄 안에서는 등장 순
+    assert first_timestamp(_c("12분 38초 골"), v) == 758
+    assert first_timestamp(_c("50:00 은 영상 길이 밖"), v) is None  # 1449초 초과는 무효
+    assert first_timestamp(_c("그냥 댓글"), v) is None
+    assert comment_has_timestamp(_c("1:02 선방"), v) and not comment_has_timestamp(_c("ㅋㅋ"), v)

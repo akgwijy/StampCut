@@ -103,6 +103,19 @@ def extract_mentions(video: VideoInfo, comment: RawComment) -> list[Mention]:
     return out
 
 
+def first_timestamp(comment: RawComment, video: VideoInfo) -> int | None:
+    """댓글에서 등장 순서상 첫 타임스탬프(초). 없으면 None. 영상 길이를 넘는 값은 무시한다."""
+    for line in comment.text.splitlines():
+        found = find_timestamps(line, video.duration)
+        if found:
+            return found[0][0]
+    return None
+
+
+def comment_has_timestamp(comment: RawComment, video: VideoInfo) -> bool:
+    return first_timestamp(comment, video) is not None
+
+
 def format_time(seconds: int) -> str:
     h, rem = divmod(int(seconds), 3600)
     m, s = divmod(rem, 60)
