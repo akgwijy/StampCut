@@ -328,7 +328,8 @@ class MainWindow(QMainWindow):
             self._schedule_autosave()
 
     def _on_listen_toggled(self, on: bool) -> None:
-        if on:
+        # 패널이 파일 없음 등으로 곧바로 되돌린 경우(재진입 setChecked(False))는 미리보기를 건드리지 않는다
+        if on and self.bgm_panel.listen_btn.isChecked():
             self.preview.pause()
 
     def _on_bgm_dir_changed(self, d: str) -> None:
@@ -454,6 +455,8 @@ class MainWindow(QMainWindow):
         self.status_panel.set_progress(stage, done, total, message)
 
     def _set_busy(self, busy: bool) -> None:
+        if busy:
+            self.preview.pause()  # 렌더/전체 미리보기 생성 중에는 미리보기(와 BGM 동기 재생)도 멈춘다
         self.url_panel.set_busy(busy)
         self.status_panel.set_busy(busy)
         self.table.setEnabled(not busy)

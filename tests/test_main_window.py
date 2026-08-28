@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from stampcut.core.models import AudioMix, Project, Settings
@@ -474,3 +476,51 @@ def test_listen_and_preview_playback_are_exclusive(qtbot, tmp_path, monkeypatch,
     assert paused == [1] and w.bgm_panel.listen_btn.isChecked()
     w.preview.playback_started.emit()  # 미리보기 재생 시작 → BGM만 듣기 정지
     assert not w.bgm_panel.listen_btn.isChecked()
+
+
+def test_refused_listen_does_not_pause_preview(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)
+    project, _ = _project_with_clip(make_video, make_clip)
+    project.audio = AudioMix(bgm_path=str(tmp_path / "gone.mp3"))  # 복원 후 파일이 지워진 상황
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w._adopt_project(project)
+    paused = []
+    monkeypatch.setattr(w.preview, "pause", lambda: paused.append(1))
+    w.bgm_panel.listen_btn.setChecked(True)
+    assert not w.bgm_panel.listen_btn.isChecked() and paused == []
+
+
+def test_busy_pauses_preview_playback(qtbot, monkeypatch):
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    paused = []
+    monkeypatch.setattr(w.preview, "pause", lambda: paused.append(1))
+    w._set_busy(True)
+    w._set_busy(False)
+    assert paused == [1]
+
+
+@pytest.mark.parametrize("edit", ["table", "title", "style", "settings"])
+def test_every_stale_hook_marks_preview(qtbot, tmp_path, monkeypatch, make_video, make_clip, edit):
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)
+    monkeypatch.setattr(main_window.settings_mod, "save", lambda s, path=None: None)
+    project, clip = _project_with_clip(make_video, make_clip)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    monkeypatch.setattr(w.preview.player, "setSource", lambda url: None)
+    monkeypatch.setattr(w.preview.player, "play", lambda: None)
+    w._adopt_project(project)
+    w.preview.set_full_preview(tmp_path / "full.mp4", main_window.pipeline.preview_signature(project, w.settings))
+    assert "최신" in w.preview.full_status.text()
+    if edit == "table":
+        clip.enabled = False
+        w._on_table_changed()
+    elif edit == "title":
+        w._on_title_changed("다른 제목")
+    elif edit == "style":
+        w.settings.title_y = 100
+        w._on_style_changed()
+    else:
+        w.apply_settings(replace(w.settings, caption_color="#123456"))
+    assert "다시 만들기" in w.preview.full_status.text()
