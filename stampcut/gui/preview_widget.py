@@ -1,6 +1,7 @@
 """최종 결과와 같은 9:16 미리보기. 정방형 안 영상을 드래그·줌으로 조절한다."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QUrl, Signal
@@ -33,6 +34,7 @@ from stampcut.core.timestamps import format_time
 
 _S = LAYOUT["square"]
 BGM_RESYNC_MS = 250  # 전체 미리보기와 BGM 위치 차이가 이보다 크면 다시 맞춘다
+BGM_SEEK_COOLDOWN_MS = 500  # 재동기 seek이 착지할 시간을 준다 (연속 seek 방지)
 
 
 def pan_after_drag(pan_x: float, pan_y: float, dx: float, dy: float, g: SquareGeometry, square: int = _S) -> tuple[float, float]:
@@ -127,6 +129,7 @@ class PreviewWidget(QWidget):
         self._full_duration_ms = 0
         self._bgm_loaded = ""
         self._bgm_duration_ms = 0
+        self._bgm_last_seek = 0.0  # time.monotonic()
 
         L = LAYOUT
         self._shut_down = False
@@ -470,6 +473,10 @@ class PreviewWidget(QWidget):
         if self._mode == "full":
             self._sync_bgm(self.player.position())
 
+    def _seek_bgm(self, target_ms: int) -> None:
+        self.bgm_player.setPosition(target_ms)
+        self._bgm_last_seek = time.monotonic()
+
     def _sync_bgm(self, t_ms: int) -> None:
         """영상 위치 t_ms에 맞춰 BGM을 재생/정지/재동기한다. 규칙은 bgm_position (렌더와 동일)."""
         playing = self._mode == "full" and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
@@ -483,10 +490,13 @@ class PreviewWidget(QWidget):
             return
         target = int(pos * 1000)
         if self.bgm_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-            self.bgm_player.setPosition(target)
+            self._seek_bgm(target)
             self.bgm_player.play()
-        elif abs(self.bgm_player.position() - target) > BGM_RESYNC_MS:
-            self.bgm_player.setPosition(target)
+            return
+        drift = abs(self.bgm_player.position() - target)
+        cooling = (time.monotonic() - self._bgm_last_seek) * 1000 < BGM_SEEK_COOLDOWN_MS
+        if drift > BGM_RESYNC_MS and not cooling:
+            self._seek_bgm(target)
 
     # --- 배치 ---
     def relayout(self) -> None:

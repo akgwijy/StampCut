@@ -1,5 +1,6 @@
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QGraphicsScene
 
 from stampcut.core.models import AudioMix, Settings
@@ -366,3 +367,70 @@ def test_shutdown_stops_bgm_player(qtbot):
     qtbot.addWidget(w)
     w.shutdown()
     assert w.bgm_player.source().isEmpty()
+
+
+def _sync_setup(qtbot, monkeypatch, tmp_path, bgm_state=QMediaPlayer.PlaybackState.PlayingState, bgm_pos=0):
+    """전체 모드 + 재생 중 + BGM 로드 완료 상태를 흉내 낸다. seeks에 setPosition 인자가 쌓인다."""
+    w = _widget(qtbot, monkeypatch)
+    seeks, plays, pauses = [], [], []
+    monkeypatch.setattr(w.bgm_player, "setPosition", lambda ms: seeks.append(ms))
+    monkeypatch.setattr(w.bgm_player, "play", lambda: plays.append(1))
+    monkeypatch.setattr(w.bgm_player, "pause", lambda: pauses.append(1))
+    monkeypatch.setattr(w.bgm_player, "playbackState", lambda: bgm_state)
+    monkeypatch.setattr(w.bgm_player, "position", lambda: bgm_pos)
+    monkeypatch.setattr(w.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    w.set_clip(make_clip_for_sync(w))
+    w.set_audio_mix(AudioMix(bgm_path=str(song), bgm_offset=30.0, bgm_start=10.0, bgm_end=None))
+    w.set_full_preview(_full_file(tmp_path), "sig")
+    w._on_duration(200_000)      # 전체 미리보기 200초
+    w._on_bgm_duration(120_000)  # 곡 120초
+    seeks.clear(); plays.clear(); pauses.clear()
+    return w, seeks, plays, pauses
+
+
+def make_clip_for_sync(w):
+    from stampcut.core.models import Clip, VideoInfo
+    from datetime import datetime, timezone
+    v = VideoInfo(0, "POZWcyKFvjY", "https://youtu.be/POZWcyKFvjY", "t", "3게임", "ch", datetime(2026, 8, 20, tzinfo=timezone.utc), 1449, 4)
+    return Clip(video=v, t=758, mentions=[], score=1.0, caption="원더골")
+
+
+def test_sync_starts_bgm_at_mapped_position(qtbot, monkeypatch, tmp_path):
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path, bgm_state=QMediaPlayer.PlaybackState.StoppedState)
+    w._sync_bgm(15_000)  # 영상 15초 = 구간 5초 → 곡 35초
+    assert seeks == [35_000] and plays == [1] and pauses == []
+
+
+def test_sync_pauses_outside_section_and_in_clip_mode(qtbot, monkeypatch, tmp_path):
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path)
+    w._sync_bgm(5_000)  # bgm_start(10초) 이전
+    assert pauses == [1] and seeks == []
+    w.set_mode("clip")
+    pauses.clear()
+    w._sync_bgm(15_000)
+    assert pauses == [1] and seeks == []
+
+
+def test_sync_reseeks_only_beyond_drift_and_after_cooldown(qtbot, monkeypatch, tmp_path):
+    from stampcut.gui import preview_widget as pw
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path, bgm_pos=35_000)
+    w._sync_bgm(15_100)  # 목표 35.1초, 오차 100ms → 유지
+    assert seeks == []
+    clock = [1000.0]
+    monkeypatch.setattr(pw.time, "monotonic", lambda: clock[0])
+    w._sync_bgm(16_000)  # 목표 36초, 오차 1000ms → 재동기
+    assert seeks == [36_000]
+    clock[0] += 0.1
+    w._sync_bgm(16_100)  # 100ms 뒤, seek 착지 전 → 쿨다운으로 재시도 안 함
+    assert seeks == [36_000]
+    clock[0] += 1.0
+    w._sync_bgm(17_200)  # 쿨다운 지남, 오차 여전히 큼 → 재동기
+    assert seeks == [36_000, 37_200]
+
+
+def test_position_tick_in_full_mode_drives_sync(qtbot, monkeypatch, tmp_path):
+    w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path, bgm_state=QMediaPlayer.PlaybackState.StoppedState)
+    w._on_position(20_000)
+    assert seeks == [40_000] and plays == [1]
