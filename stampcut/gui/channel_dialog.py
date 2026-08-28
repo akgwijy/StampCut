@@ -27,6 +27,13 @@ from stampcut.gui.workers import Worker
 BAD_REF_HINT = "채널 주소(@핸들, channel/UC…)나 영상 주소를 넣으세요. /c/·/user/ 주소는 지원하지 않습니다."
 COMMENT_CONFIRM_THRESHOLD = 3000  # 이보다 댓글이 많으면 할당량(100개당 1유닛)을 안내하고 확인받는다
 
+_ORPHANED_WORKERS: list[Worker] = []  # 창이 닫힌 뒤에도 도는 워커. setAutoDelete(False)라 누군가 참조를 쥐고 있어야 한다
+
+
+def _adopt_orphans(workers: list[Worker]) -> None:
+    """닫히는 창의 실행 중 워커를 넘겨받고, 이미 끝난 워커는 정리한다."""
+    _ORPHANED_WORKERS[:] = [w for w in _ORPHANED_WORKERS if not w.done] + [w for w in workers if not w.done]
+
 
 def _job(fn, *args, progress, cancel, **kwargs):
     """core 예외를 사용자 문구로 바꾼다 (main_window._analyze_job과 같은 규칙)."""
@@ -249,6 +256,7 @@ class ChannelDialog(QDialog):
             if not w.done:
                 w.cancel.set()
                 w.signals.blockSignals(True)
+        _adopt_orphans(self._workers)  # 창이 deleteLater로 사라져도 실행 중 QRunnable이 해제되지 않게
         self._worker = None
         self._pending_video = None
         self._set_busy(False)

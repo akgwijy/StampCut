@@ -14,6 +14,14 @@ CH = ChannelInfo("UC" + "x" * 22, "문성FC", "UU" + "x" * 22)
 A, B, C = "A" * 11, "B" * 11, "C" * 11
 
 
+@pytest.fixture(autouse=True)
+def _no_modal_warning(monkeypatch):
+    """워커 오류가 나면 모달 경고창 대신 목록에 담아, 테스트가 멈추지 않고 실패로 드러나게 한다."""
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    return warned
+
+
 def _video(vid, title, comments):
     return VideoInfo(0, vid, f"https://www.youtube.com/watch?v={vid}", title, title, "문성FC", datetime(2026, 8, 20, tzinfo=timezone.utc), 1449, comments)
 
@@ -247,3 +255,21 @@ def test_big_comment_count_asks_before_loading(qtbot, monkeypatch):
     with qtbot.waitSignal(dlg.comments_loaded, timeout=5000):
         dlg._on_video_selected(dlg.video_model.index(0, 0), None)  # 같은 행 다시 → 이번엔 예
     assert dlg.comment_model.rowCount() == 2
+
+
+def test_close_during_load_keeps_worker_alive_outside_dialog(qtbot):
+    from stampcut.gui import channel_dialog as cd
+
+    client = _client()
+    gate = threading.Event()
+    _slow_pages(client, gate, None)
+    dlg = _dialog(qtbot, client)
+    dlg.ref_edit.setText("@moonsungfc")
+    dlg.find()
+    old = dlg._worker
+    dlg.close()
+    assert any(w is old for w in cd._ORPHANED_WORKERS)  # 창이 삭제돼도 실행 중 QRunnable이 GC되지 않게
+    gate.set()
+    qtbot.waitUntil(lambda: old.done, timeout=5000)
+    dlg.close()  # 다음 close에서 끝난 워커는 정리된다
+    assert not any(w is old for w in cd._ORPHANED_WORKERS)

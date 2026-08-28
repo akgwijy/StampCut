@@ -597,3 +597,32 @@ def test_channel_urls_do_not_clobber_render_progress_or_result(qtbot):
     w._on_channel_urls(["https://youtu.be/BBBBBBBBBBB"])
     assert w.status_panel.has_result() and not w.status_panel.open_folder_btn.isHidden()
     assert w.status_panel.message.text() == "URL 1개 추가됨 — 댓글 분석을 누르세요"
+
+
+def test_declining_quit_keeps_channel_dialog_open(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from stampcut.gui.workers import Worker
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.open_channel_finder()
+    dlg = w._channel_dialog
+    worker = Worker(lambda progress, cancel: None)  # 실행 전 → 진행 중으로 간주
+    w._workers.append(worker)
+    w.close()
+    assert dlg.isVisible()  # 종료를 취소하면 채널 창도 그대로
+    worker.done = True  # qtbot의 정리(close)가 monkeypatch 해제 후 실제 모달을 띄우지 않도록
+
+
+def test_channel_urls_do_not_clobber_running_analysis(qtbot):
+    from stampcut.gui.workers import Worker
+
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    worker = Worker(lambda progress, cancel: None)  # 분석 워커가 도는 중
+    w._workers.append(worker)
+    w.status_panel.set_progress("analyze", 1, 2, "댓글 수집 중")
+    w._on_channel_urls(["https://youtu.be/AAAAAAAAAAA"])
+    assert w.status_panel.message.text() == "댓글 수집 중" and w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA"]
+    worker.done = True  # qtbot의 정리(close)가 진행 중인 워커 때문에 실제 종료 확인 모달을 띄우지 않도록

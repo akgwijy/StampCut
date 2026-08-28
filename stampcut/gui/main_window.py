@@ -356,8 +356,8 @@ class MainWindow(QMainWindow):
     def _on_channel_urls(self, urls: list) -> None:
         n = self.url_panel.add_urls(list(urls))
         text = f"URL {n}개 추가됨 — 댓글 분석을 누르세요" if n else "이미 목록에 있는 영상입니다"
-        if self._rendering():
-            return  # 렌더 진행률 표시를 덮지 않는다
+        if self._rendering() or any(not w.done for w in self._workers):
+            return  # 진행 중 작업의 상태줄을 덮지 않는다
         if self.status_panel.has_result():
             self.status_panel.message.setText(text)  # 완성된 결과의 열기/재생 버튼은 유지
         else:
@@ -526,13 +526,13 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "StampCut", text)
 
     def closeEvent(self, event) -> None:
-        if self._channel_dialog is not None:  # 채널 창 워커를 먼저 취소해야 아래 waitForDone이 그것까지 기다리지 않는다
-            self._channel_dialog.close()
         active = [w for w in self._workers if not w.done]
+        if active and QMessageBox.question(self, "StampCut", "작업이 진행 중입니다. 취소하고 종료할까요?") != QMessageBox.Yes:
+            event.ignore()
+            return
+        if self._channel_dialog is not None:
+            self._channel_dialog.close()  # 채널 창 워커를 먼저 취소해야 아래 waitForDone이 그것까지 기다리지 않는다
         if active:
-            if QMessageBox.question(self, "StampCut", "작업이 진행 중입니다. 취소하고 종료할까요?") != QMessageBox.Yes:
-                event.ignore()
-                return
             for w in active:
                 w.cancel.set()
             self.pool.waitForDone(5000)
