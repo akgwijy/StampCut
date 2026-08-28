@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QProgressBar, QP
 from stampcut.core.models import Project, Settings
 from stampcut.core.timestamps import format_time
 
-STAGE_WEIGHTS = {"download": (0, 40), "render": (40, 50), "concat": (90, 10)}
+STAGE_WEIGHTS = {"download": (0, 40), "render": (40, 50), "concat": (90, 5), "mix": (95, 5)}
 
 
 def overall_percent(stage: str, done: int, total: int) -> int:

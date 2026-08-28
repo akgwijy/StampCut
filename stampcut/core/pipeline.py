@@ -18,7 +18,7 @@ from stampcut.core import ffmpeg as ff
 from stampcut.core.downloader import DownloadCancelled, DownloadFailed, Downloader, preview_covers
 from stampcut.core.highlights import build_clips
 from stampcut.core.models import Clip, ClipStatus, Mention, Project, Settings, VideoInfo
-from stampcut.core.renderer import build_clip_command, build_concat_command, write_concat_list
+from stampcut.core.renderer import build_clip_command, build_concat_command, build_mix_command, write_concat_list
 from stampcut.core.settings import render_dir, resolve_font
 from stampcut.core.timestamps import extract_mentions, format_time
 from stampcut.core.youtube_api import YouTubeClient, parse_video_id
@@ -130,6 +130,9 @@ def render(
     clips = project.enabled_clips()
     if not clips:
         raise ValueError("켜진 클립이 없습니다")
+    audio = project.audio
+    if audio.has_bgm() and not Path(audio.bgm_path).is_file():
+        raise ValueError(f"배경 음악 파일을 찾을 수 없습니다: {audio.bgm_path}")
     _check(cancel)
     job = render_dir() / uuid.uuid4().hex
     job.mkdir(parents=True, exist_ok=True)
@@ -173,13 +176,20 @@ def render(
         outputs.append(out)
 
     progress("concat", 0, 1, "합치는 중")
-    tmp_output = job / "output.mp4"
-    ff.run(build_concat_command(paths, write_concat_list(outputs, job), tmp_output), cancel=cancel)
+    concat_out = job / "concat.mp4"
+    ff.run(build_concat_command(paths, write_concat_list(outputs, job), concat_out), cancel=cancel)
+    final = concat_out
+    if not audio.is_default():
+        _check(cancel)
+        progress("mix", 0, 1, "배경 음악 섞는 중")
+        total = ff.probe(paths, concat_out).duration
+        final = job / "output.mp4"
+        ff.run(build_mix_command(paths, concat_out, audio, total, final), cancel=cancel, total_seconds=total)
     # 성공했을 때만 결과 파일이 생기도록 임시 파일을 옮긴다 (취소/실패는 output_path를 남기지 않는다).
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(tmp_output, output_path)
+    os.replace(final, output_path)
     for d in render_dir().iterdir():  # 이번 작업 폴더와 이전에 남은 찌꺼기를 함께 지운다
         if d.is_dir():
             shutil.rmtree(d, ignore_errors=True)
-    progress("concat", 1, 1, "완료")
+    progress("concat" if audio.is_default() else "mix", 1, 1, "완료")
     return output_path

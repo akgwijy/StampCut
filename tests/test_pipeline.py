@@ -6,7 +6,7 @@ import pytest
 from stampcut.core import pipeline
 from stampcut.core.downloader import DownloadCancelled, DownloadFailed
 from stampcut.core.ffmpeg import Cancelled, FfmpegPaths, ProbeInfo
-from stampcut.core.models import ClipStatus, Project, RawComment, Settings
+from stampcut.core.models import AudioMix, ClipStatus, Project, RawComment, Settings
 
 
 class FakeClient:
@@ -223,3 +223,47 @@ def test_render_without_enabled_clips(tmp_path, make_video, make_clip):
     v = make_video()
     with pytest.raises(ValueError):
         pipeline.render(Project([v.url], "t", [v], [make_clip(v, 1, enabled=False)]), Settings(), tmp_path / "o.mp4", FakeDownloader(tmp_path), _paths(tmp_path))
+
+
+def test_render_mixes_bgm_after_concat(fake_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    p = Project([v.url], "제목", [v], [make_clip(v, 100)])
+    p.audio = AudioMix(bgm_path=str(song), bgm_volume=0.2)
+    out = tmp_path / "out" / "제목.mp4"
+    prog = []
+    pipeline.render(p, Settings(), out, FakeDownloader(tmp_path), _paths(tmp_path), progress=lambda *x: prog.append(x))
+    assert out.exists() and len(fake_ffmpeg) == 3  # 클립 렌더 + concat + 믹스
+    mix = fake_ffmpeg[-1]
+    assert str(song) in mix and "-stream_loop" in mix and mix[mix.index("-c:v") + 1] == "copy"
+    assert mix[mix.index("-t") + 1] == "18.000"  # probe 길이
+    assert "concat" in " ".join(fake_ffmpeg[-2])
+    assert [x[0] for x in prog if x[0] == "mix"] == ["mix", "mix"] and prog[-1][:2] == ("mix", 1)
+    assert not any((tmp_path / "render").iterdir())
+
+
+def test_render_skips_mix_for_default_audio(fake_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    p = Project([v.url], "제목", [v], [make_clip(v, 100)])
+    pipeline.render(p, Settings(), tmp_path / "o.mp4", FakeDownloader(tmp_path), _paths(tmp_path))
+    assert len(fake_ffmpeg) == 2 and not any("-stream_loop" in c for c in fake_ffmpeg)
+
+
+def test_render_original_volume_only_still_mixes(fake_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    p = Project([v.url], "제목", [v], [make_clip(v, 100)])
+    p.audio = AudioMix(original_volume=0.5)
+    pipeline.render(p, Settings(), tmp_path / "o.mp4", FakeDownloader(tmp_path), _paths(tmp_path))
+    mix = fake_ffmpeg[-1]
+    assert len(fake_ffmpeg) == 3 and "volume=0.500" in mix[mix.index("-filter_complex") + 1]
+
+
+def test_render_missing_bgm_fails_before_download(fake_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    p = Project([v.url], "제목", [v], [make_clip(v, 100)])
+    p.audio = AudioMix(bgm_path=str(tmp_path / "gone.mp3"))
+    dl = FakeDownloader(tmp_path)
+    with pytest.raises(ValueError, match="배경 음악"):
+        pipeline.render(p, Settings(), tmp_path / "o.mp4", dl, _paths(tmp_path))
+    assert dl.calls == [] and fake_ffmpeg == []
