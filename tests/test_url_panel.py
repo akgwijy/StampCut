@@ -40,7 +40,7 @@ def test_vertical_stacking(qtbot):
 def test_add_urls_appends_without_duplicates(qtbot):
     p = UrlPanel()
     qtbot.addWidget(p)
-    p.urls_edit.setPlainText("https://youtu.be/AAAAAAAAAAA\n")
+    p.urls_edit.setPlainText("https://youtu.be/AAAAAAAAAAA\n")  # 마지막 줄이 빈 줄 (Enter를 친 상태)
     changes = []
     p.urls_edit.textChanged.connect(lambda: changes.append(1))
     n = p.add_urls([
@@ -50,9 +50,20 @@ def test_add_urls_appends_without_duplicates(qtbot):
         "junk",
     ])
     assert n == 1
-    assert p.urls() == ["https://youtu.be/AAAAAAAAAAA", "https://www.youtube.com/watch?v=BBBBBBBBBBB"]
+    assert p.urls_edit.toPlainText() == "https://youtu.be/AAAAAAAAAAA\nhttps://www.youtube.com/watch?v=BBBBBBBBBBB"  # 빈 줄 없음
     assert len(changes) == 1
     assert p.add_urls(["https://youtu.be/BBBBBBBBBBB"]) == 0 and len(changes) == 1
+
+
+def test_add_urls_batch_after_text_without_trailing_newline(qtbot):
+    p = UrlPanel()
+    qtbot.addWidget(p)
+    p.urls_edit.setPlainText("https://youtu.be/AAAAAAAAAAA")
+    changes = []
+    p.urls_edit.textChanged.connect(lambda: changes.append(1))
+    assert p.add_urls([" https://youtu.be/BBBBBBBBBBB ", "https://youtu.be/CCCCCCCCCCC"]) == 2
+    assert p.urls_edit.toPlainText() == "https://youtu.be/AAAAAAAAAAA\nhttps://youtu.be/BBBBBBBBBBB\nhttps://youtu.be/CCCCCCCCCCC"
+    assert len(changes) == 1  # 여러 개를 넣어도 textChanged는 한 번
 
 
 def test_add_urls_into_empty_panel(qtbot):
@@ -60,3 +71,11 @@ def test_add_urls_into_empty_panel(qtbot):
     qtbot.addWidget(p)
     assert p.add_urls(["https://youtu.be/AAAAAAAAAAA"]) == 1
     assert p.urls_edit.toPlainText() == "https://youtu.be/AAAAAAAAAAA"
+
+
+def test_add_urls_ignores_junk_existing_lines(qtbot):
+    p = UrlPanel()
+    qtbot.addWidget(p)
+    p.urls_edit.setPlainText("not a url\n\n")
+    assert p.add_urls(["https://youtu.be/AAAAAAAAAAA"]) == 1
+    assert p.urls() == ["not a url", "https://youtu.be/AAAAAAAAAAA"]
