@@ -173,3 +173,9 @@ def test_mix_command_end_none_runs_to_total(tmp_path):
     audio = AudioMix(bgm_path="s.mp3", bgm_start=10.0)
     fc = filter_complex(build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 100.0, tmp_path / "o.mp4"))
     assert "atrim=duration=90.000" in fc and "afade=t=out:st=88.000:d=2" in fc and "adelay=10000|10000" in fc
+
+
+def test_mix_command_clamps_negative_offset_to_zero(tmp_path):
+    audio = AudioMix(bgm_path="s.mp3", bgm_offset=-5.0)
+    fc = filter_complex(build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 30.0, tmp_path / "o.mp4"))
+    assert "atrim=start=0.000" in fc

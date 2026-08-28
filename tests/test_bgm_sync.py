@@ -38,3 +38,9 @@ def test_offset_beyond_duration_is_normalized():
 def test_no_bgm_or_zero_duration():
     assert bgm_position(20.0, AudioMix(), 120.0, 200.0) is None
     assert bgm_position(20.0, mix(), 0.0, 200.0) is None
+
+
+def test_negative_offset_is_treated_as_zero():
+    # build_mix_command가 음수 offset을 0으로 클램프하므로 미리보기도 같은 규칙
+    assert bgm_position(10.0, mix(bgm_offset=-10.0), 120.0, 200.0) == 0.0
+    assert bgm_position(15.0, mix(bgm_offset=-10.0), 120.0, 200.0) == 5.0

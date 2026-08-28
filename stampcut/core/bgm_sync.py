@@ -15,7 +15,7 @@ def bgm_position(t: float, audio: AudioMix, bgm_duration: float, total: float) -
     if t < audio.bgm_start or t >= end:
         return None
     e = t - audio.bgm_start
-    offset = audio.bgm_offset % bgm_duration
+    offset = max(0.0, audio.bgm_offset) % bgm_duration  # 음수는 0으로 (build_mix_command와 동일)
     first = bgm_duration - offset
     if e < first:
         return offset + e
