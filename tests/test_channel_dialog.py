@@ -15,6 +15,16 @@ A, B, C = "A" * 11, "B" * 11, "C" * 11
 
 
 @pytest.fixture(autouse=True)
+def _isolate_orphaned_workers():
+    """닫힌 창이 넘긴 워커 목록이 테스트 사이에 남지 않게 한다."""
+    from stampcut.gui import channel_dialog as cd
+
+    cd._ORPHANED_WORKERS.clear()
+    yield
+    cd._ORPHANED_WORKERS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_modal_warning(monkeypatch):
     """워커 오류가 나면 모달 경고창 대신 목록에 담아, 테스트가 멈추지 않고 실패로 드러나게 한다."""
     warned = []

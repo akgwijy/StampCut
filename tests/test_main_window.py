@@ -613,7 +613,6 @@ def test_declining_quit_keeps_channel_dialog_open(qtbot, monkeypatch):
     w.close()
     assert dlg.isVisible()  # 종료를 취소하면 채널 창도 그대로
     worker.done = True  # teardown에서 창을 닫을 때 종료 확인창(모달)이 뜨지 않게
-    worker.done = True  # qtbot의 정리(close)가 monkeypatch 해제 후 실제 모달을 띄우지 않도록
 
 
 def test_channel_urls_do_not_clobber_running_analysis(qtbot):
@@ -627,4 +626,3 @@ def test_channel_urls_do_not_clobber_running_analysis(qtbot):
     w._on_channel_urls(["https://youtu.be/AAAAAAAAAAA"])
     assert w.status_panel.message.text() == "댓글 수집 중" and w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA"]
     worker.done = True  # teardown에서 창을 닫을 때 종료 확인창(모달)이 뜨지 않게
-    worker.done = True  # qtbot의 정리(close)가 진행 중인 워커 때문에 실제 종료 확인 모달을 띄우지 않도록
