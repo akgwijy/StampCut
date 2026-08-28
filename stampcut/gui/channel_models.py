@@ -1,15 +1,12 @@
 """채널 영상 찾기 창의 표 모델: 영상 목록(체크·타임스탬프 수)과 댓글 목록(타임스탬프 강조)."""
 from __future__ import annotations
 
-from datetime import timedelta, timezone
-
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QFont
 
-from stampcut.core.models import RawComment, VideoInfo
+from stampcut.core.models import KST, RawComment, VideoInfo
 from stampcut.core.timestamps import first_timestamp, format_time
 
-KST = timezone(timedelta(hours=9))
 V_CHECK, V_DATE, V_TITLE, V_LENGTH, V_COMMENTS, V_STAMPS = range(6)
 VIDEO_HEADERS = ["✓", "날짜", "제목", "길이", "댓글", "타임스탬프"]
 C_TIME, C_AUTHOR, C_LIKES, C_TEXT = range(4)
