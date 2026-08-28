@@ -35,3 +35,28 @@ def test_vertical_stacking(qtbot):
     assert w.urls_edit.geometry().bottom() < w.title_edit.geometry().top()
     assert w.analyze_btn.geometry().left() > w.title_edit.geometry().left()
     assert abs(w.analyze_btn.geometry().center().y() - w.title_edit.geometry().center().y()) < 20
+
+
+def test_add_urls_appends_without_duplicates(qtbot):
+    p = UrlPanel()
+    qtbot.addWidget(p)
+    p.urls_edit.setPlainText("https://youtu.be/AAAAAAAAAAA\n")
+    changes = []
+    p.urls_edit.textChanged.connect(lambda: changes.append(1))
+    n = p.add_urls([
+        "https://www.youtube.com/watch?v=AAAAAAAAAAA",  # 이미 있음 (같은 id)
+        "https://www.youtube.com/watch?v=BBBBBBBBBBB",
+        "https://youtu.be/BBBBBBBBBBB",  # 같은 호출 안 중복
+        "junk",
+    ])
+    assert n == 1
+    assert p.urls() == ["https://youtu.be/AAAAAAAAAAA", "https://www.youtube.com/watch?v=BBBBBBBBBBB"]
+    assert len(changes) == 1
+    assert p.add_urls(["https://youtu.be/BBBBBBBBBBB"]) == 0 and len(changes) == 1
+
+
+def test_add_urls_into_empty_panel(qtbot):
+    p = UrlPanel()
+    qtbot.addWidget(p)
+    assert p.add_urls(["https://youtu.be/AAAAAAAAAAA"]) == 1
+    assert p.urls_edit.toPlainText() == "https://youtu.be/AAAAAAAAAAA"

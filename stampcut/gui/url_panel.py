@@ -57,6 +57,19 @@ class UrlPanel(QWidget):
     def _clear_marks(self) -> None:
         self.urls_edit.setExtraSelections([])
 
+    def add_urls(self, urls: list[str]) -> int:
+        """이미 있는 영상(id 기준)은 건너뛰고 새 줄로 덧붙인다. 추가한 개수를 돌려준다."""
+        known = {parse_video_id(line) for line in self._lines()}
+        fresh: list[str] = []
+        for u in urls:
+            vid = parse_video_id(u)
+            if vid and vid not in known:
+                known.add(vid)
+                fresh.append(u.strip())
+        if fresh:
+            self.urls_edit.appendPlainText("\n".join(fresh))  # textChanged 한 번
+        return len(fresh)
+
     def title(self) -> str:
         return self.title_edit.text()
 
