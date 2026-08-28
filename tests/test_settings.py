@@ -13,6 +13,7 @@ def test_dirs_follow_env(monkeypatch, tmp_path):
     assert sm.cache_dir() == tmp_path / "local" / "StampCut" / "cache"
     assert sm.render_dir() == tmp_path / "local" / "StampCut" / "render"
     assert sm.log_dir() == tmp_path / "local" / "StampCut" / "logs"
+    assert sm.preview_dir() == tmp_path / "local" / "StampCut" / "preview"
 
 
 def test_load_missing_returns_defaults(tmp_path):

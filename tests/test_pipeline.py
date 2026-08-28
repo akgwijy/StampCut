@@ -267,3 +267,109 @@ def test_render_missing_bgm_fails_before_download(fake_ffmpeg, tmp_path, make_vi
     with pytest.raises(ValueError, match="배경 음악"):
         pipeline.render(p, Settings(), tmp_path / "o.mp4", dl, _paths(tmp_path))
     assert dl.calls == [] and fake_ffmpeg == []
+
+
+@pytest.fixture
+def fake_preview_ffmpeg(monkeypatch, tmp_path):
+    runs = []
+    monkeypatch.setattr(pipeline, "preview_dir", lambda: tmp_path / "preview")
+    monkeypatch.setattr(pipeline.ff, "probe", lambda paths, f: ProbeInfo(640, 360, 90.0, True))
+
+    def fake_run(cmd, on_progress=None, cancel=None, total_seconds=None):
+        runs.append(cmd)
+        Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+        Path(cmd[-1]).write_bytes(b"x")
+        if on_progress:
+            on_progress(1.0)
+
+    monkeypatch.setattr(pipeline.ff, "run", fake_run)
+    return runs
+
+
+def _ready(clip, s, root):
+    """여유분(앞 30초/뒤 60초)이 있는 미리보기 구간 파일이 받아진 상태."""
+    clip.preview_start, clip.preview_end = max(0, clip.t - 30), clip.t + 60
+    clip.preview_path = root / f"p{clip.t}.mp4"
+    clip.preview_path.write_bytes(b"x")
+    clip.status = ClipStatus.READY
+    return clip
+
+
+def test_render_preview_uses_preview_files_with_offsets(fake_preview_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    s = Settings()
+    a, off, c = _ready(make_clip(v, 100), s, tmp_path), make_clip(v, 500, enabled=False), _ready(make_clip(v, 900), s, tmp_path)
+    p = Project([v.url], "제목", [v], [a, off, c])
+    prog = []
+    result = pipeline.render_preview(p, s, _paths(tmp_path), progress=lambda *x: prog.append(x))
+    assert result.parent == tmp_path / "preview" and result.name.startswith("full_") and result.exists()
+    assert len(fake_preview_ffmpeg) == 3  # 켜진 클립 2개 + concat
+    first = fake_preview_ffmpeg[0]
+    assert first[first.index("-ss") + 1] == "27"  # start(97) - preview_start(70)
+    assert first[first.index("-i") + 1] == str(a.preview_path)
+    assert first[first.index("-preset") + 1] == "ultrafast" and "s=540x960" in first[first.index("-filter_complex") + 1]
+    assert "concat" in fake_preview_ffmpeg[-1]
+    assert not any(d.is_dir() for d in (tmp_path / "preview").iterdir())  # 작업 폴더 정리
+    assert prog[0][0] == "preview_render" and prog[-1][3] == "전체 미리보기 준비됨"
+
+
+def test_render_preview_replaces_previous_file(fake_preview_ffmpeg, tmp_path, make_video, make_clip):
+    v = make_video()
+    s = Settings()
+    p = Project([v.url], "제목", [v], [_ready(make_clip(v, 100), s, tmp_path)])
+    old = tmp_path / "preview" / "full_old.mp4"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"x")
+    result = pipeline.render_preview(p, s, _paths(tmp_path))
+    assert not old.exists() and result.exists()
+
+
+def test_render_preview_requires_ready_previews(tmp_path, make_video, make_clip, monkeypatch):
+    monkeypatch.setattr(pipeline, "preview_dir", lambda: tmp_path / "preview")
+    v = make_video()
+    s = Settings()
+    a, b = _ready(make_clip(v, 100), s, tmp_path), make_clip(v, 758)
+    with pytest.raises(ValueError, match="3게임 12:38"):
+        pipeline.render_preview(Project([v.url], "제목", [v], [a, b]), s, _paths(tmp_path))
+    assert not (tmp_path / "preview").exists()
+    with pytest.raises(ValueError, match="켜진 클립"):
+        pipeline.render_preview(Project([v.url], "제목", [v], [make_clip(v, 1, enabled=False)]), s, _paths(tmp_path))
+
+
+def test_render_preview_cancel_cleans_up(tmp_path, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(pipeline, "preview_dir", lambda: tmp_path / "preview")
+    monkeypatch.setattr(pipeline.ff, "probe", lambda paths, f: ProbeInfo(640, 360, 90.0, True))
+
+    def fake_run(cmd, on_progress=None, cancel=None, total_seconds=None):
+        if "concat" in cmd:
+            raise Cancelled()
+        Path(cmd[-1]).write_bytes(b"x")
+
+    monkeypatch.setattr(pipeline.ff, "run", fake_run)
+    v = make_video()
+    s = Settings()
+    p = Project([v.url], "제목", [v], [_ready(make_clip(v, 100), s, tmp_path)])
+    with pytest.raises(Cancelled):
+        pipeline.render_preview(p, s, _paths(tmp_path))
+    assert list((tmp_path / "preview").iterdir()) == []
+
+
+def test_preview_signature_tracks_visible_edits_only(make_video, make_clip):
+    v = make_video()
+    s = Settings()
+    a, b = make_clip(v, 100), make_clip(v, 500, enabled=False)
+    p = Project([v.url], "제목", [v], [a, b])
+    base = pipeline.preview_signature(p, s)
+    assert base == pipeline.preview_signature(p, s)
+    b.caption = "끈 클립 자막"
+    p.audio = AudioMix(bgm_path="x.mp3")
+    assert pipeline.preview_signature(p, s) == base  # 끈 클립·BGM은 화면에 안 보임
+    a.caption = "바뀐 자막"
+    changed = pipeline.preview_signature(p, s)
+    assert changed != base
+    b.enabled = True
+    assert pipeline.preview_signature(p, s) != changed
+    p.title = "다른 제목"
+    t = pipeline.preview_signature(p, s)
+    assert t != changed
+    assert pipeline.preview_signature(p, Settings(title_y=100)) != t

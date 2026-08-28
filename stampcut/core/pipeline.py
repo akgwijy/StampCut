@@ -4,6 +4,8 @@ fetch_previews의 on_clip은 여러 워커 스레드에서 동시에 호출되�
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -18,8 +20,8 @@ from stampcut.core import ffmpeg as ff
 from stampcut.core.downloader import DownloadCancelled, DownloadFailed, Downloader, preview_covers
 from stampcut.core.highlights import build_clips
 from stampcut.core.models import Clip, ClipStatus, Mention, Project, Settings, VideoInfo
-from stampcut.core.renderer import build_clip_command, build_concat_command, build_mix_command, write_concat_list
-from stampcut.core.settings import render_dir, resolve_font
+from stampcut.core.renderer import PREVIEW_PROFILE, build_clip_command, build_concat_command, build_mix_command, write_concat_list
+from stampcut.core.settings import preview_dir, render_dir, resolve_font
 from stampcut.core.timestamps import extract_mentions, format_time
 from stampcut.core.youtube_api import YouTubeClient, parse_video_id
 
@@ -193,3 +195,71 @@ def render(
             shutil.rmtree(d, ignore_errors=True)
     progress("concat" if audio.is_default() else "mix", 1, 1, "완료")
     return output_path
+
+
+def preview_signature(project: Project, s: Settings) -> str:
+    """전체 미리보기 파일이 지금 편집 상태와 맞는지 비교하기 위한 해시. 화면에 보이는 것만 (BGM·끈 클립 제외)."""
+    payload = {
+        "title": project.title,
+        "clips": [
+            [c.video.video_id, c.t, c.effective_pre(s), c.effective_post(s), c.zoom, c.pan_x, c.pan_y, c.caption]
+            for c in project.enabled_clips()
+        ],
+        "style": [s.title_y, s.title_color, s.caption_y, s.caption_color, s.background_color, s.show_time_in_caption, s.font_path],
+    }
+    return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def render_preview(
+    project: Project,
+    s: Settings,
+    paths: ff.FfmpegPaths,
+    progress: ProgressFn = _noop,
+    cancel: threading.Event | None = None,
+) -> Path:
+    """켜진 클립의 360p 미리보기 구간으로 540x960 전체 미리보기 mp4를 만든다. 고화질 다운로드·BGM 없음."""
+    clips = project.enabled_clips()
+    if not clips:
+        raise ValueError("켜진 클립이 없습니다")
+    missing = [c for c in clips if not preview_covers(c, s)]
+    if missing:
+        raise ValueError("미리보기가 준비되지 않은 클립: " + ", ".join(_label(c) for c in missing))
+    _check(cancel)
+    root = preview_dir()
+    job = root / uuid.uuid4().hex
+    job.mkdir(parents=True, exist_ok=True)
+    font = resolve_font(s)
+    n = len(clips)
+    try:
+        outputs: list[Path] = []
+        for i, c in enumerate(clips):
+            _check(cancel)
+            label = _label(c)
+            progress("preview_render", i * 100, n * 100, f"{label} 미리보기 렌더 중")
+            info = ff.probe(paths, c.preview_path)
+            cmd, out = build_clip_command(
+                paths, c, s, project.title, info, job, i, font,
+                profile=PREVIEW_PROFILE, source=c.preview_path, in_offset=c.start(s) - c.preview_start,
+            )
+
+            def _on_fraction(f: float, i: int = i, label: str = label) -> None:
+                progress("preview_render", i * 100 + int(f * 100), n * 100, f"{label} 미리보기 렌더 중")
+
+            ff.run(cmd, on_progress=_on_fraction, cancel=cancel, total_seconds=c.duration(s))
+            outputs.append(out)
+        _check(cancel)
+        progress("preview_render", n * 100, n * 100, "합치는 중")
+        tmp = job / "full.mp4"
+        ff.run(build_concat_command(paths, write_concat_list(outputs, job), tmp), cancel=cancel)
+        result = root / f"full_{job.name}.mp4"
+        os.replace(tmp, result)
+    finally:
+        shutil.rmtree(job, ignore_errors=True)
+    for old in root.glob("full_*.mp4"):
+        if old != result:
+            try:
+                old.unlink()
+            except OSError:  # 플레이어가 잡고 있는 파일 — 다음에 다시 시도
+                pass
+    progress("preview_render", n * 100, n * 100, "전체 미리보기 준비됨")
+    return result
