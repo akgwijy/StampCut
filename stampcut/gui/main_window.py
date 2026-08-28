@@ -30,6 +30,7 @@ from stampcut.core.models import Clip, ClipStatus, Project, Settings
 from stampcut.core.renderer import unique_output_path
 from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
 from stampcut.gui.bgm_panel import BgmPanel
+from stampcut.gui.channel_dialog import ChannelDialog
 from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME, ClipTableModel, SecondsDelegate
 from stampcut.gui.preview_widget import PreviewWidget, load_font_family
 from stampcut.gui.settings_dialog import SettingsDialog
@@ -86,6 +87,9 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         self.settings_action = toolbar.addAction("⚙ 설정", self.open_settings)
+        self.channel_action = toolbar.addAction("채널 영상 찾기", self.open_channel_finder)
+        self._channel_dialog: ChannelDialog | None = None
+        self._channel_dialog_key = ""
 
         self.url_panel = UrlPanel()
         self.url_panel.analyze_requested.connect(self.start_analysis)
@@ -325,6 +329,30 @@ class MainWindow(QMainWindow):
         self.settings.output_dir = d
         settings_mod.save(self.settings)
 
+    # --- 채널 영상 찾기 ---
+    def open_channel_finder(self) -> None:
+        if not self.settings.api_key:
+            self._warn("YouTube API 키가 필요합니다. 설정에서 입력하세요.")
+            self.open_settings()
+            return
+        if self._channel_dialog is None or self._channel_dialog_key != self.settings.api_key:
+            if self._channel_dialog is not None:
+                self._channel_dialog.close()
+            self._channel_dialog = ChannelDialog(YouTubeClient(self.settings.api_key), parent=self)
+            self._channel_dialog_key = self.settings.api_key
+            self._channel_dialog.urls_selected.connect(self._on_channel_urls)
+        urls = self.url_panel.urls()
+        if urls:
+            self._channel_dialog.set_default_ref(urls[0])
+        self._channel_dialog.show()
+        self._channel_dialog.raise_()
+        self._channel_dialog.activateWindow()
+
+    def _on_channel_urls(self, urls: list) -> None:
+        n = self.url_panel.add_urls(list(urls))
+        if not self.status_panel.has_result():  # 완성된 결과의 열기/재생 버튼은 지우지 않는다
+            self.status_panel.set_idle(f"URL {n}개 추가됨 — 댓글 분석을 누르세요" if n else "이미 목록에 있는 영상입니다")
+
     def _on_audio_changed(self) -> None:
         if self.project:
             self.preview.set_audio_mix(self.project.audio)
@@ -499,6 +527,8 @@ class MainWindow(QMainWindow):
             self._bridge.blockSignals(True)
             for w in active:  # 시간 안에 안 끝난 워커가 뒤늦게 시그널로 죽은 위젯을 건드리지 않도록
                 w.signals.blockSignals(True)
+        if self._channel_dialog is not None:
+            self._channel_dialog.close()
         self._flush_autosave()
         self.bgm_panel.stop()
         self.preview.shutdown()

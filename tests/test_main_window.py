@@ -526,6 +526,45 @@ def test_every_stale_hook_marks_preview(qtbot, tmp_path, monkeypatch, make_video
     assert "다시 만들기" in w.preview.full_status.text()
 
 
+def test_channel_finder_requires_api_key(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    w = MainWindow(Settings())
+    qtbot.addWidget(w)
+    monkeypatch.setattr(w, "open_settings", lambda: None)
+    w.open_channel_finder()
+    assert warned and "API 키" in warned[0] and w._channel_dialog is None
+
+
+def test_channel_finder_opens_with_default_ref_and_adds_urls(qtbot, monkeypatch):
+    monkeypatch.setattr(main_window.settings_mod, "save", lambda s, path=None: None)  # 실제 설정 파일을 건드리지 않는다
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.show()
+    assert w.channel_action.text() == "채널 영상 찾기" and w.channel_action.isEnabled()
+    w.url_panel.urls_edit.setPlainText("https://youtu.be/AAAAAAAAAAA")
+    w.open_channel_finder()
+    dlg = w._channel_dialog
+    assert dlg is not None and dlg.isVisible() and dlg.ref_edit.text() == "https://youtu.be/AAAAAAAAAAA"
+    dlg.urls_selected.emit(["https://youtu.be/AAAAAAAAAAA", "https://www.youtube.com/watch?v=BBBBBBBBBBB"])
+    assert w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA", "https://www.youtube.com/watch?v=BBBBBBBBBBB"]
+    assert w.status_panel.message.text() == "URL 1개 추가됨 — 댓글 분석을 누르세요"
+    dlg.urls_selected.emit(["https://youtu.be/BBBBBBBBBBB"])
+    assert w.status_panel.message.text() == "이미 목록에 있는 영상입니다"
+    w.open_channel_finder()
+    assert w._channel_dialog is dlg  # 같은 API 키면 창을 재사용
+    w.apply_settings(replace(w.settings, api_key="OTHER"))
+    w.open_channel_finder()
+    assert w._channel_dialog is not dlg  # 키가 바뀌면 새 클라이언트로 다시 만든다
+    dlg2 = w._channel_dialog
+    w._set_busy(True)
+    assert w.channel_action.isEnabled()  # 분석·렌더 중에도 열 수 있다
+    w.close()
+    assert not dlg2.isVisible()
+
+
 def test_video_and_settings_split_half_and_half(qtbot):
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
