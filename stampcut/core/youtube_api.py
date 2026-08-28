@@ -170,6 +170,30 @@ class YouTubeClient:
             raise ChannelNotFound(text)
         return self._channel_by(text, id=channel_id)
 
+    def _video_items(self, ids: list[str]) -> dict[str, dict]:
+        """videos.list를 50개씩 묶어 id → 항목."""
+        items: dict[str, dict] = {}
+        for i in range(0, len(ids), 50):
+            data = self._get("videos", part="snippet,contentDetails,statistics", id=",".join(ids[i : i + 50]))
+            for it in data.get("items", []):
+                items[it["id"]] = it
+        return items
+
+    @staticmethod
+    def _video_info(it: dict, idx: int, vid: str, url: str) -> VideoInfo:
+        sn = it["snippet"]
+        return VideoInfo(
+            index=idx,
+            video_id=vid,
+            url=url,
+            title=sn["title"],
+            short_name=short_name_from_title(sn["title"], idx),
+            channel_title=sn.get("channelTitle", ""),
+            published_at=datetime.fromisoformat(sn["publishedAt"].replace("Z", "+00:00")),
+            duration=parse_iso_duration(it["contentDetails"]["duration"]),
+            comment_count=int(it.get("statistics", {}).get("commentCount", 0)),
+        )
+
     def fetch_video_infos(self, urls: list[str], strict: bool = True) -> list[VideoInfo]:
         """strict=False면 응답에 없는 영상은 건너뛴다. 하나도 못 찾았을 때만 VideoNotFound."""
         ids: list[str] = []
@@ -178,11 +202,7 @@ class YouTubeClient:
             if not vid:
                 raise ValueError(u)
             ids.append(vid)
-        items: dict[str, dict] = {}
-        for i in range(0, len(ids), 50):
-            data = self._get("videos", part="snippet,contentDetails,statistics", id=",".join(ids[i : i + 50]))
-            for it in data.get("items", []):
-                items[it["id"]] = it
+        items = self._video_items(ids)
         infos: list[VideoInfo] = []
         missing: list[str] = []
         for idx, (u, vid) in enumerate(zip(urls, ids)):
@@ -192,23 +212,42 @@ class YouTubeClient:
                     raise VideoNotFound(vid)
                 missing.append(vid)
                 continue
-            sn = it["snippet"]
-            infos.append(
-                VideoInfo(
-                    index=idx,
-                    video_id=vid,
-                    url=u.strip(),
-                    title=sn["title"],
-                    short_name=short_name_from_title(sn["title"], idx),
-                    channel_title=sn.get("channelTitle", ""),
-                    published_at=datetime.fromisoformat(sn["publishedAt"].replace("Z", "+00:00")),
-                    duration=parse_iso_duration(it["contentDetails"]["duration"]),
-                    comment_count=int(it.get("statistics", {}).get("commentCount", 0)),
-                )
-            )
+            infos.append(self._video_info(it, idx, vid, u.strip()))
         if not infos and missing:
             raise VideoNotFound(missing[0])
         return infos
+
+    def fetch_channel_videos(self, channel: ChannelInfo, limit: int = 200, page_token: str | None = None) -> tuple[list[VideoInfo], str | None]:
+        """업로드 재생목록을 최신순으로 limit개(페이지 단위 올림)까지 훑어 댓글이 있는 영상만 돌려준다.
+
+        두 번째 값은 다음 페이지 토큰(없으면 None). playlistItems 50개당 1유닛 + videos 50개당 1유닛.
+        """
+        if not channel.uploads_playlist_id:
+            return [], None
+        ids: list[str] = []
+        token = page_token
+        next_token: str | None = None
+        while True:
+            params: dict = dict(part="contentDetails", playlistId=channel.uploads_playlist_id, maxResults=50)
+            if token:
+                params["pageToken"] = token
+            data = self._get("playlistItems", **params)
+            ids.extend(it["contentDetails"]["videoId"] for it in data.get("items", []) if "contentDetails" in it)
+            token = data.get("nextPageToken")
+            next_token = token
+            if not token or len(ids) >= limit:
+                break
+        items = self._video_items(ids)
+        infos: list[VideoInfo] = []
+        for vid in ids:
+            it = items.get(vid)
+            if not it or "snippet" not in it or "contentDetails" not in it:
+                continue
+            info = self._video_info(it, len(infos), vid, f"https://www.youtube.com/watch?v={vid}")
+            if info.comment_count > 0:
+                info.channel_title = channel.title or info.channel_title
+                infos.append(info)
+        return infos, next_token
 
     def _fetch_replies(self, parent_id: str) -> list[RawComment]:
         out: list[RawComment] = []
