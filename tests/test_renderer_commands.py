@@ -1,11 +1,12 @@
 from pathlib import Path
 
 from stampcut.core.ffmpeg import FfmpegPaths, ProbeInfo
-from stampcut.core.models import Settings
+from stampcut.core.models import AudioMix, Settings
 from stampcut.core.renderer import (
     PREVIEW_PROFILE,
     build_clip_command,
     build_concat_command,
+    build_mix_command,
     ff_color,
     ff_path,
     sanitize_filename,
@@ -135,3 +136,40 @@ def test_default_profile_has_no_seek_and_uses_final_path(tmp_path, make_video, m
     cmd, _ = build(tmp_path, make_clip(make_video(), t=758))
     assert "-ss" not in cmd and cmd[cmd.index("-i") + 1] == str(tmp_path / "final.mp4")
     assert cmd[cmd.index("-preset") + 1] == "medium"
+
+
+def test_mix_command_with_bgm(tmp_path):
+    song = tmp_path / "song.mp3"
+    audio = AudioMix(original_volume=0.5, bgm_path=str(song), bgm_volume=0.3, bgm_offset=30.0, bgm_start=5.0, bgm_end=65.0)
+    cmd = build_mix_command(paths(tmp_path), tmp_path / "concat.mp4", audio, 180.0, tmp_path / "out.mp4")
+    fc = filter_complex(cmd)
+    i_bgm = cmd.index(str(song))
+    assert cmd[i_bgm - 1] == "-i" and cmd[i_bgm - 3:i_bgm - 1] == ["-stream_loop", "-1"]
+    assert cmd[cmd.index("-i") + 1] == str(tmp_path / "concat.mp4")  # 첫 -i는 영상
+    assert "[0:a]volume=0.500[a0]" in fc
+    assert "[1:a]atrim=start=30.000,asetpts=PTS-STARTPTS,atrim=duration=60.000,asetpts=PTS-STARTPTS" in fc
+    assert "afade=t=in:d=1,afade=t=out:st=58.000:d=2,volume=0.300,adelay=5000|5000,apad[a1]" in fc
+    assert "[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]" in fc
+    assert cmd[cmd.index("-c:v") + 1] == "copy" and cmd[cmd.index("-t") + 1] == "180.000"
+    assert cmd[cmd.index("-map") + 1] == "0:v" and "[a]" in cmd
+    assert cmd[-1] == str(tmp_path / "out.mp4")
+
+
+def test_mix_command_without_bgm_only_scales_original(tmp_path):
+    cmd = build_mix_command(paths(tmp_path), tmp_path / "c.mp4", AudioMix(original_volume=0.25), 30.0, tmp_path / "o.mp4")
+    assert filter_complex(cmd) == "[0:a]volume=0.250[a]"
+    assert "-stream_loop" not in cmd and cmd.count("-i") == 1
+
+
+def test_mix_command_drops_bgm_when_section_too_short(tmp_path):
+    audio = AudioMix(bgm_path="s.mp3", bgm_start=100.0, bgm_end=100.2)
+    cmd = build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 180.0, tmp_path / "o.mp4")
+    assert filter_complex(cmd) == "[0:a]volume=1.000[a]" and "s.mp3" not in cmd
+    audio = AudioMix(bgm_path="s.mp3", bgm_start=500.0)  # 구간이 영상 밖 → total로 잘려 0초
+    assert "s.mp3" not in build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 180.0, tmp_path / "o.mp4")
+
+
+def test_mix_command_end_none_runs_to_total(tmp_path):
+    audio = AudioMix(bgm_path="s.mp3", bgm_start=10.0)
+    fc = filter_complex(build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 100.0, tmp_path / "o.mp4"))
+    assert "atrim=duration=90.000" in fc and "afade=t=out:st=88.000:d=2" in fc and "adelay=10000|10000" in fc

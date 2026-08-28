@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from stampcut.core.ffmpeg import FfmpegPaths, ProbeInfo
-from stampcut.core.models import Clip, Settings
+from stampcut.core.models import AudioMix, Clip, Settings
 from stampcut.core.textwrap_kr import wrap
 from stampcut.core.timestamps import format_time
 
@@ -205,3 +205,49 @@ def write_concat_list(files: list[Path], workdir: Path) -> Path:
 
 def build_concat_command(paths: FfmpegPaths, list_path: Path, output: Path) -> list[str]:
     return [str(paths.ffmpeg), "-hide_banner", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", "-movflags", "+faststart", str(output)]
+
+
+BGM_FADE_IN = 1.0
+BGM_FADE_OUT = 2.0
+BGM_MIN_SECTION = 0.5  # 이보다 짧은 구간엔 BGM을 넣지 않는다
+
+
+def build_mix_command(paths: FfmpegPaths, video: Path, audio: AudioMix, total: float, out: Path) -> list[str]:
+    """concat 결과(video)에 원본 볼륨·BGM을 적용해 최종 파일을 만드는 명령. 비디오는 재인코딩하지 않는다.
+
+    BGM 반복 규칙: 첫 재생은 bgm_offset부터 곡 끝까지, 이후 곡 처음부터 반복 (bgm_sync.bgm_position과 동일).
+    -stream_loop -1로 무한 반복한 스트림에서 앞 offset초를 잘라내면 정확히 이 동작이 된다.
+    """
+    orig = f"volume={_clamp(audio.original_volume, 0.0, 1.0):.3f}"
+    start = _clamp(audio.bgm_start, 0.0, total)
+    end = _clamp(audio.bgm_end if audio.bgm_end is not None else total, start, total)
+    section = end - start
+    cmd: list = [paths.ffmpeg, "-hide_banner", "-i", video]
+    if audio.has_bgm() and section >= BGM_MIN_SECTION:
+        cmd += ["-stream_loop", "-1", "-i", audio.bgm_path]
+        start_ms = int(round(start * 1000))
+        bgm = ",".join(
+            [
+                f"atrim=start={max(0.0, audio.bgm_offset):.3f}",
+                "asetpts=PTS-STARTPTS",
+                f"atrim=duration={section:.3f}",
+                "asetpts=PTS-STARTPTS",
+                f"afade=t=in:d={BGM_FADE_IN:g}",
+                f"afade=t=out:st={max(0.0, section - BGM_FADE_OUT):.3f}:d={BGM_FADE_OUT:g}",
+                f"volume={_clamp(audio.bgm_volume, 0.0, 1.0):.3f}",
+                f"adelay={start_ms}|{start_ms}",
+                "apad",
+            ]
+        )
+        filters = f"[0:a]{orig}[a0];[1:a]{bgm}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+    else:
+        filters = f"[0:a]{orig}[a]"
+    cmd += [
+        "-filter_complex", filters,
+        "-map", "0:v", "-c:v", "copy",
+        "-map", "[a]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-t", f"{total:.3f}",
+        "-movflags", "+faststart",
+        out,
+    ]
+    return [str(c) for c in cmd]
