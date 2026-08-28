@@ -185,6 +185,10 @@ class MainWindow(QMainWindow):
 
     def apply_settings(self, s: Settings) -> None:
         self.settings = s
+        if self._channel_dialog is not None and self._channel_dialog_key != s.api_key:
+            self._channel_dialog.close()  # 옛 API 키의 클라이언트를 계속 쓰지 않도록
+            self._channel_dialog.deleteLater()
+            self._channel_dialog = None
         settings_mod.save(s)
         self._rebuild_tools()
         self.model.set_settings(s)
@@ -338,6 +342,7 @@ class MainWindow(QMainWindow):
         if self._channel_dialog is None or self._channel_dialog_key != self.settings.api_key:
             if self._channel_dialog is not None:
                 self._channel_dialog.close()
+                self._channel_dialog.deleteLater()
             self._channel_dialog = ChannelDialog(YouTubeClient(self.settings.api_key), parent=self)
             self._channel_dialog_key = self.settings.api_key
             self._channel_dialog.urls_selected.connect(self._on_channel_urls)
@@ -350,8 +355,13 @@ class MainWindow(QMainWindow):
 
     def _on_channel_urls(self, urls: list) -> None:
         n = self.url_panel.add_urls(list(urls))
-        if not self.status_panel.has_result():  # 완성된 결과의 열기/재생 버튼은 지우지 않는다
-            self.status_panel.set_idle(f"URL {n}개 추가됨 — 댓글 분석을 누르세요" if n else "이미 목록에 있는 영상입니다")
+        text = f"URL {n}개 추가됨 — 댓글 분석을 누르세요" if n else "이미 목록에 있는 영상입니다"
+        if self._rendering():
+            return  # 렌더 진행률 표시를 덮지 않는다
+        if self.status_panel.has_result():
+            self.status_panel.message.setText(text)  # 완성된 결과의 열기/재생 버튼은 유지
+        else:
+            self.status_panel.set_idle(text)
 
     def _on_audio_changed(self) -> None:
         if self.project:
@@ -516,6 +526,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "StampCut", text)
 
     def closeEvent(self, event) -> None:
+        if self._channel_dialog is not None:  # 채널 창 워커를 먼저 취소해야 아래 waitForDone이 그것까지 기다리지 않는다
+            self._channel_dialog.close()
         active = [w for w in self._workers if not w.done]
         if active:
             if QMessageBox.question(self, "StampCut", "작업이 진행 중입니다. 취소하고 종료할까요?") != QMessageBox.Yes:
@@ -527,8 +539,6 @@ class MainWindow(QMainWindow):
             self._bridge.blockSignals(True)
             for w in active:  # 시간 안에 안 끝난 워커가 뒤늦게 시그널로 죽은 위젯을 건드리지 않도록
                 w.signals.blockSignals(True)
-        if self._channel_dialog is not None:
-            self._channel_dialog.close()
         self._flush_autosave()
         self.bgm_panel.stop()
         self.preview.shutdown()

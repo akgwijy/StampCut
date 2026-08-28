@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -579,3 +580,20 @@ def test_video_and_settings_split_half_and_half(qtbot):
     qtbot.waitUntil(lambda: w.splitter.sizes()[1] > b, timeout=2000)
     a2, b2 = w.splitter.sizes()
     assert a2 == a and b2 >= b + 390  # 왼쪽은 그대로, 미리보기만 커진다
+
+
+def test_channel_urls_do_not_clobber_render_progress_or_result(qtbot):
+    from stampcut.gui.workers import Worker
+
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w._render_worker = Worker(lambda progress, cancel: None)  # 실행 전 → 렌더 중으로 간주
+    w.status_panel.set_progress("render", 50, 100, "렌더링 중")
+    w._on_channel_urls(["https://youtu.be/AAAAAAAAAAA"])
+    assert w.status_panel.progress.value() == 65 and w.status_panel.message.text() == "렌더링 중"
+    assert w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA"]  # URL은 추가된다
+    w._render_worker.done = True
+    w.status_panel.set_done(Path("C:/out/x.mp4"))
+    w._on_channel_urls(["https://youtu.be/BBBBBBBBBBB"])
+    assert w.status_panel.has_result() and not w.status_panel.open_folder_btn.isHidden()
+    assert w.status_panel.message.text() == "URL 1개 추가됨 — 댓글 분석을 누르세요"

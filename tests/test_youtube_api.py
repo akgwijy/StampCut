@@ -93,6 +93,21 @@ def test_fetch_video_infos_builds_infos_in_url_order():
 
 
 @responses.activate
+def test_video_items_chunks_ids_by_fifty():
+    ids = [f"{i:011d}" for i in range(51)]  # 11자리 숫자 id 51개
+
+    def cb(request):
+        got = parse_qs(urlparse(request.url).query)["id"][0].split(",")
+        return 200, {}, json.dumps({"items": [video_item(v) for v in got]})
+
+    responses.add_callback(responses.GET, f"{BASE_URL}/videos", callback=cb, content_type="application/json")
+    infos = YouTubeClient("KEY").fetch_video_infos(ids)
+    assert len(infos) == 51 and [v.index for v in infos] == list(range(51))
+    assert len(responses.calls) == 2
+    assert len(parse_qs(urlparse(responses.calls[0].request.url).query)["id"][0].split(",")) == 50
+
+
+@responses.activate
 def test_fetch_video_infos_missing_raises():
     responses.get(f"{BASE_URL}/videos", json={"items": []})
     with pytest.raises(VideoNotFound) as ei:

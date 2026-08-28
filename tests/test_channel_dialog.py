@@ -206,3 +206,44 @@ def test_job_maps_api_errors_to_user_messages():
         _job(boom, QuotaError("q"), progress=None, cancel=None)
     with pytest.raises(RuntimeError, match="채널을 찾을 수 없습니다: @x"):
         _job(boom, ChannelNotFound("@x"), progress=None, cancel=None)
+
+
+def test_comments_for_superseded_selection_are_not_shown(qtbot):
+    client = _client()
+    gate = threading.Event()
+    original = client.fetch_all_comments
+
+    def slow(video_id):
+        if video_id == A:
+            assert gate.wait(5)
+        return original(video_id)
+
+    client.fetch_all_comments = slow
+    dlg = _dialog(qtbot, client)
+    _find(qtbot, dlg)
+    dlg.videos.selectRow(0)  # A 로드 시작 (gate에 막힘)
+    dlg.videos.selectRow(1)  # busy → B가 pending
+    with qtbot.waitSignal(dlg.comments_loaded, timeout=5000):  # A 완료
+        gate.set()
+    assert dlg.comment_model.rowCount() == 0  # A의 댓글이 B가 선택된 표를 덮지 않는다
+    assert dlg.video_model.data(dlg.video_model.index(0, V_STAMPS)) == 1  # 개수는 기록된다
+    # busy()/calls는 워커 스레드가 직접 건드리는 상태라 Qt 신호 전달보다 먼저 참이 될 수 있다(waitUntil이
+    # 첫 호출에 만족되면 이벤트 루프를 한 번도 돌리지 않는다). status.text() 자체를 기다려야 경쟁이 없다.
+    qtbot.waitUntil(lambda: dlg.status.text() == "2게임: 댓글이 없거나 막힌 영상입니다", timeout=5000)
+    assert not dlg.busy() and ("comments", B) in dlg.client.calls
+
+
+def test_big_comment_count_asks_before_loading(qtbot, monkeypatch):
+    client = _client()
+    client.pages[None][0][0].comment_count = 5000  # 1게임
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    dlg = _dialog(qtbot, client)
+    _find(qtbot, dlg)
+    dlg.videos.selectRow(0)
+    assert asked and "5,000" in asked[0] and "51유닛" in asked[0]
+    assert not [c for c in client.calls if c[0] == "comments"] and "불러오지 않았습니다" in dlg.status.text()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    with qtbot.waitSignal(dlg.comments_loaded, timeout=5000):
+        dlg._on_video_selected(dlg.video_model.index(0, 0), None)  # 같은 행 다시 → 이번엔 예
+    assert dlg.comment_model.rowCount() == 2

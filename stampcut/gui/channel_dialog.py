@@ -19,11 +19,13 @@ from PySide6.QtWidgets import (
 
 from stampcut.core import channel as channel_mod
 from stampcut.core.models import ChannelInfo, RawComment, VideoInfo
+from stampcut.core.timestamps import comment_has_timestamp
 from stampcut.core.youtube_api import ApiKeyError, ChannelNotFound, QuotaError, parse_channel_ref
 from stampcut.gui.channel_models import V_TITLE, ChannelVideoModel, CommentModel
 from stampcut.gui.workers import Worker
 
 BAD_REF_HINT = "채널 주소(@핸들, channel/UC…)나 영상 주소를 넣으세요. /c/·/user/ 주소는 지원하지 않습니다."
+COMMENT_CONFIRM_THRESHOLD = 3000  # 이보다 댓글이 많으면 할당량(100개당 1유닛)을 안내하고 확인받는다
 
 
 def _job(fn, *args, progress, cancel, **kwargs):
@@ -164,10 +166,18 @@ class ChannelDialog(QDialog):
         if cached is not None:
             self._show_comments(video, cached)
             return
+        if video.comment_count > COMMENT_CONFIRM_THRESHOLD and not self._confirm_big(video):
+            self.status.setText(f"{video.short_name}: 댓글 {video.comment_count:,}개 — 불러오지 않았습니다")
+            return
         if self.busy():
             self._pending_video = video  # 끝나면 마지막 선택을 이어서 불러온다
             return
         self._start_comments(video)
+
+    def _confirm_big(self, video: VideoInfo) -> bool:
+        units = video.comment_count // 100 + 1
+        text = f"댓글이 {video.comment_count:,}개입니다. 모두 받으면 API 할당량을 약 {units}유닛 이상 씁니다.\n계속할까요?"
+        return QMessageBox.question(self, "채널 영상 찾기", text) == QMessageBox.Yes
 
     def _start_comments(self, video: VideoInfo) -> None:
         w = Worker(_job, channel_mod.load_comments, self.client, video)
@@ -179,8 +189,9 @@ class ChannelDialog(QDialog):
     def _on_comments(self, video: VideoInfo, comments: list) -> None:
         self._set_busy(False)
         self._comment_cache[video.video_id] = comments
-        self._show_comments(video, comments)
-        self.video_model.set_timestamp_count(video.video_id, self.comment_model.timestamp_count())
+        self.video_model.set_timestamp_count(video.video_id, sum(1 for c in comments if comment_has_timestamp(c, video)))
+        if self._pending_video is None:  # 사용자가 이미 다른 행으로 옮겼으면 표는 그 영상 차례에 채운다
+            self._show_comments(video, comments)
         self.comments_loaded.emit(video)
         self._run_pending()
 

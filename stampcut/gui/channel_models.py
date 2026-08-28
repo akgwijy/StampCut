@@ -30,12 +30,18 @@ class ChannelVideoModel(QAbstractTableModel):
         self.checked_changed.emit()
 
     def append(self, videos: list[VideoInfo]) -> None:
-        """페이지를 덧붙인다. index는 표에서의 순서로 다시 매긴다."""
-        if not videos:
+        """페이지를 덧붙인다 (이미 있는 영상은 건너뜀). index는 표에서의 순서로 다시 매긴다."""
+        known = {v.video_id for v in self.videos}
+        fresh: list[VideoInfo] = []
+        for v in videos:
+            if v.video_id not in known:
+                known.add(v.video_id)
+                fresh.append(v)
+        if not fresh:
             return
         start = len(self.videos)
-        self.beginInsertRows(QModelIndex(), start, start + len(videos) - 1)
-        for i, v in enumerate(videos):
+        self.beginInsertRows(QModelIndex(), start, start + len(fresh) - 1)
+        for i, v in enumerate(fresh):
             v.index = start + i
             self.videos.append(v)
         self.endInsertRows()
@@ -68,6 +74,8 @@ class ChannelVideoModel(QAbstractTableModel):
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+        if not index.isValid():
+            return Qt.NoItemFlags
         f = Qt.ItemIsEnabled | Qt.ItemIsSelectable
         if index.column() == V_CHECK:
             f |= Qt.ItemIsUserCheckable

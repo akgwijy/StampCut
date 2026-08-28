@@ -54,3 +54,14 @@ def test_comment_model_marks_timestamps(qtbot, make_video):
     assert m.data(m.index(0, C_TIME), Qt.FontRole).bold() and m.data(m.index(1, C_TIME), Qt.FontRole) is None
     m.set_comments(None, [])
     assert m.rowCount() == 0 and m.timestamp_count() == 0
+
+
+def test_video_model_append_skips_duplicates_and_invalid_flags(qtbot, make_video):
+    from PySide6.QtCore import QModelIndex
+
+    m = ChannelVideoModel()
+    a = make_video(video_id="A" * 11)
+    m.append([a])
+    m.append([make_video(video_id="A" * 11), make_video(video_id="B" * 11)])
+    assert m.rowCount() == 2 and m.row_of("B" * 11) == 1
+    assert m.flags(QModelIndex()) == Qt.NoItemFlags
