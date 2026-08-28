@@ -78,7 +78,7 @@ PREVIEW_PROFILE = RenderProfile(scale=0.5, preset="ultrafast", crf=28)   # 540x9
   - `in_offset`: 초. `> 0`이면 `-ss {in_offset}`를 `-i` **앞**에 둔다 (입력 시킹).
     미리보기 구간 파일은 여유분이 있으므로 `clip.start(s) - clip.preview_start`.
   - `profile.scale`로 `canvas_w/h`, `square`, `square_y`, 폰트 3종, `title_y`, `caption_y`,
-    `TIME_GAP`, `max_text_width`를 모두 곱해 짝수로 맞춘다(`_even`). `wrap()`에는 배율 적용 전
+    `TIME_GAP`을 모두 곱해 짝수로 맞춘다(`_even`). `wrap()`에는 배율 적용 전
     폰트·폭을 넘겨 줄바꿈 결과가 최종과 같게 한다. `-preset`/`-crf`는 프로필 값.
   - 기본 인자로 호출하면 지금과 완전히 같은 명령을 만든다 (기존 테스트 불변).
 

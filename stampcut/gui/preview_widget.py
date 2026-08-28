@@ -112,6 +112,7 @@ class PreviewWidget(QWidget):
     style_changed = Signal()  # 타이틀·자막 위치/색 변경 (settings에 직접 반영됨; 메인 창이 저장)
     full_preview_requested = Signal()
     bgm_error = Signal(str)
+    playback_started = Signal()  # 이 위젯이 재생을 시작함 (BGM만 듣기와 겹치지 않도록 메인 창이 듣는다)
 
     def __init__(self, settings: Settings, font_family: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -350,6 +351,13 @@ class PreviewWidget(QWidget):
         self._paint_color_button(self.title_color_btn, self.settings.title_color)
         self._paint_color_button(self.caption_color_btn, self.settings.caption_color)
 
+    def pause(self) -> None:
+        """재생 중이면 일시정지 (BGM 동기 플레이어 포함). 재생 중이 아니면 아무 일도 없다."""
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+            self.play_btn.setText("▶ 재생")
+        self.bgm_player.pause()
+
     def set_title(self, title: str) -> None:
         self.title = title
         self.relayout()
@@ -383,6 +391,7 @@ class PreviewWidget(QWidget):
         self._update_seek_range()
         self.player.setPosition(self._window_ms()[0])
         self.player.play()
+        self.playback_started.emit()
         self.play_btn.setText("⏸ 일시정지")
 
     # --- 전체 미리보기 ---
@@ -434,6 +443,7 @@ class PreviewWidget(QWidget):
             self._set_controls_enabled(True)
             self._update_seek_range()
             self.player.play()
+            self.playback_started.emit()
             self.play_btn.setText("⏸ 일시정지")
         else:
             self.player.setLoops(QMediaPlayer.Loops.Infinite)
@@ -608,11 +618,13 @@ class PreviewWidget(QWidget):
             self.bgm_player.pause()
         elif state == QMediaPlayer.PlaybackState.PausedState and self._loaded_path is not None:
             self.player.play()
+            self.playback_started.emit()
             self.play_btn.setText("⏸ 일시정지")
             self._sync_bgm(self.player.position())
         elif self._mode == "full":
             self.player.setPosition(0)
             self.player.play()
+            self.playback_started.emit()
             self.play_btn.setText("⏸ 일시정지")
         else:
             self.refresh_media()

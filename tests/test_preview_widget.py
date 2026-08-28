@@ -434,3 +434,19 @@ def test_position_tick_in_full_mode_drives_sync(qtbot, monkeypatch, tmp_path):
     w, seeks, plays, pauses = _sync_setup(qtbot, monkeypatch, tmp_path, bgm_state=QMediaPlayer.PlaybackState.StoppedState)
     w._on_position(20_000)
     assert seeks == [40_000] and plays == [1]
+
+
+def test_pause_and_playback_started_signal(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    w = _widget(qtbot, monkeypatch)
+    started = []
+    w.playback_started.connect(lambda: started.append(1))
+    w.set_clip(make_clip(make_video(), t=758))  # preview_path 없음 → 재생 안 함
+    assert started == []
+    w.set_full_preview(_full_file(tmp_path), "sig")  # 전체 모드 진입 = 재생 시작
+    assert started == [1]
+    monkeypatch.setattr(w.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState)
+    pauses = []
+    monkeypatch.setattr(w.player, "pause", lambda: pauses.append("video"))
+    monkeypatch.setattr(w.bgm_player, "pause", lambda: pauses.append("bgm"))
+    w.pause()
+    assert pauses == ["video", "bgm"] and w.play_btn.text() == "▶ 재생"

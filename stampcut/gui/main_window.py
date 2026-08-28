@@ -124,6 +124,9 @@ class MainWindow(QMainWindow):
         self.bgm_panel.set_bgm_dir(self.settings.bgm_dir)
         self.bgm_panel.changed.connect(self._on_audio_changed)
         self.bgm_panel.bgm_dir_changed.connect(self._on_bgm_dir_changed)
+        # BGM만 듣기와 미리보기 재생은 동시에 소리 내지 않는다
+        self.preview.playback_started.connect(self.bgm_panel.stop)
+        self.bgm_panel.listen_btn.toggled.connect(self._on_listen_toggled)
 
         self.status_panel = StatusPanel()
         self.status_panel.render_requested.connect(self.start_render)
@@ -323,6 +326,10 @@ class MainWindow(QMainWindow):
         if self.project:
             self.preview.set_audio_mix(self.project.audio)
             self._schedule_autosave()
+
+    def _on_listen_toggled(self, on: bool) -> None:
+        if on:
+            self.preview.pause()
 
     def _on_bgm_dir_changed(self, d: str) -> None:
         self.settings.bgm_dir = d

@@ -320,8 +320,12 @@ def test_render_preview_replaces_previous_file(fake_preview_ffmpeg, tmp_path, ma
     old = tmp_path / "preview" / "full_old.mp4"
     old.parent.mkdir(parents=True)
     old.write_bytes(b"x")
+    crashed = tmp_path / "preview" / "crashed-job" / "clip_000.mp4"
+    crashed.parent.mkdir(parents=True)
+    crashed.write_bytes(b"x")
     result = pipeline.render_preview(p, s, _paths(tmp_path))
     assert not old.exists() and result.exists()
+    assert not (tmp_path / "preview" / "crashed-job").exists()
 
 
 def test_render_preview_requires_ready_previews(tmp_path, make_video, make_clip, monkeypatch):

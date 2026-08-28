@@ -454,3 +454,23 @@ def test_restore_fills_bgm_panel_and_busy_locks_it(qtbot, tmp_path, monkeypatch,
     assert not w2.bgm_panel.isEnabled()
     w2._set_busy(False)
     assert w2.bgm_panel.isEnabled()
+
+
+def test_listen_and_preview_playback_are_exclusive(qtbot, tmp_path, monkeypatch, make_video, make_clip):
+    monkeypatch.setattr(MainWindow, "start_previews", lambda self, clips: None)
+    project, _ = _project_with_clip(make_video, make_clip)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    project.audio = AudioMix(bgm_path=str(song))
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    for p in (w.bgm_panel.player, w.preview.player, w.preview.bgm_player):
+        monkeypatch.setattr(p, "setSource", lambda url: None)
+        monkeypatch.setattr(p, "play", lambda: None)
+    w._adopt_project(project)
+    paused = []
+    monkeypatch.setattr(w.preview, "pause", lambda: paused.append(1))
+    w.bgm_panel.listen_btn.setChecked(True)  # BGM만 듣기 시작 → 미리보기 일시정지
+    assert paused == [1] and w.bgm_panel.listen_btn.isChecked()
+    w.preview.playback_started.emit()  # 미리보기 재생 시작 → BGM만 듣기 정지
+    assert not w.bgm_panel.listen_btn.isChecked()

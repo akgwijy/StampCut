@@ -179,3 +179,17 @@ def test_mix_command_clamps_negative_offset_to_zero(tmp_path):
     audio = AudioMix(bgm_path="s.mp3", bgm_offset=-5.0)
     fc = filter_complex(build_mix_command(paths(tmp_path), tmp_path / "c.mp4", audio, 30.0, tmp_path / "o.mp4"))
     assert "atrim=start=0.000" in fc
+
+
+def test_preview_profile_wraps_like_final(tmp_path, make_video, make_clip):
+    long_caption = "아주 긴 자막 문장이 계속 이어져서 한 줄에 다 들어가지 않는다 " * 3
+    final_clip = make_clip(make_video(), t=758, caption=long_caption)
+    build(tmp_path, final_clip)
+    final_txt = (tmp_path / "clip_003_caption.txt").read_text("utf-8")
+    assert "\n" in final_txt  # 최종 렌더에서 두 줄로 나뉜다
+    pv = tmp_path / "pv"
+    pv.mkdir()
+    preview_clip = make_clip(make_video(), t=758, caption=long_caption)
+    preview_clip.preview_path = tmp_path / "preview.mp4"
+    build_clip_command(paths(tmp_path), preview_clip, Settings(), "제목", probe(), pv, 3, tmp_path / "font.otf", profile=PREVIEW_PROFILE, source=preview_clip.preview_path)
+    assert (pv / "clip_003_caption.txt").read_text("utf-8") == final_txt  # 배율과 무관하게 같은 자리에서 줄바꿈

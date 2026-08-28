@@ -255,8 +255,10 @@ def render_preview(
         os.replace(tmp, result)
     finally:
         shutil.rmtree(job, ignore_errors=True)
-    for old in root.glob("full_*.mp4"):
-        if old != result:
+    for old in root.iterdir():  # 이전 결과 파일과 비정상 종료로 남은 작업 폴더를 함께 지운다
+        if old.is_dir():
+            shutil.rmtree(old, ignore_errors=True)
+        elif old != result and old.name.startswith("full_") and old.suffix == ".mp4":
             try:
                 old.unlink()
             except OSError:  # 플레이어가 잡고 있는 파일 — 다음에 다시 시도
