@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+
+KST = timezone(timedelta(hours=9))  # 화면·파일명에 쓰는 한국 시각
 
 
 @dataclass
@@ -42,6 +44,13 @@ class VideoInfo:
     published_at: datetime
     duration: int
     comment_count: int
+
+
+@dataclass
+class ChannelInfo:
+    channel_id: str
+    title: str
+    uploads_playlist_id: str  # 채널 업로드 재생목록 (UU…)
 
 
 @dataclass

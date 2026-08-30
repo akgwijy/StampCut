@@ -12,14 +12,13 @@ import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
 from stampcut.core import ffmpeg as ff
 from stampcut.core.downloader import DownloadCancelled, DownloadFailed, Downloader, preview_covers
 from stampcut.core.highlights import build_clips
-from stampcut.core.models import Clip, ClipStatus, Mention, Project, Settings, VideoInfo
+from stampcut.core.models import KST, Clip, ClipStatus, Mention, Project, Settings, VideoInfo
 from stampcut.core.renderer import PREVIEW_PROFILE, build_clip_command, build_concat_command, build_mix_command, write_concat_list
 from stampcut.core.settings import preview_dir, render_dir, resolve_font
 from stampcut.core.timestamps import extract_mentions, format_time
@@ -27,7 +26,6 @@ from stampcut.core.youtube_api import YouTubeClient, parse_video_id
 
 log = logging.getLogger(__name__)
 ProgressFn = Callable[[str, int, int, str], None]
-KST = timezone(timedelta(hours=9))
 
 
 def _noop(stage: str, done: int, total: int, message: str) -> None:

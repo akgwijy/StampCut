@@ -128,7 +128,7 @@ def add_urls(self, urls: list[str]) -> int
 레이아웃
 - 1행: `ref_edit`(QLineEdit, 플레이스홀더 "채널 주소(@핸들, channel/UC…) 또는 그 채널의 영상 주소") ·
   `find_btn` "찾기"(Enter로도) · `more_btn` "더 보기"(다음 페이지 있을 때만 활성).
-- 2행: `status` 라벨 — "문성FC — 댓글 있는 영상 37개 (최근 200개 중)" / 진행 메시지 / 오류.
+- 2행: `status` 라벨 — "문성FC — 댓글 있는 영상 37개 (더 보기 가능)" / 진행 메시지 / 오류.
 - 가운데 `QSplitter(Horizontal)`:
   - 왼쪽 `videos: QTableView` + `ChannelVideoModel(QAbstractTableModel)`
     열: `COL_CHECK`(체크) · 날짜(`yy.mm.dd`, KST) · 제목 · 길이(`format_time`) · 댓글 수 ·
@@ -150,6 +150,7 @@ def add_urls(self, urls: list[str]) -> int
   → 결과를 캐시(`dict[video_id, list[RawComment]]`)에 넣고 표시, 타임스탬프 수 =
   `sum(comment_has_timestamp)`를 모델에 반영. 로드 중 다른 행을 고르면 `_pending_video`에
   기억했다가 끝난 뒤 이어서 로드한다(항상 마지막 선택만).
+- 댓글이 3,000개를 넘는 영상은 할당량(100개당 1유닛)을 안내하는 확인 대화상자를 거친다. 아니오면 불러오지 않고 status에 표시.
 - `add_btn`: 체크된 영상의 `url` 목록으로 `urls_selected(list)` 발생. 창은 닫지 않는다.
 - 워커: 기존 `Worker`(QThreadPool) 사용, 한 번에 하나(`self._worker`). 실행 중엔
   `find_btn`·`more_btn`·`ref_edit` 비활성, 댓글 로드 중엔 영상 표 선택은 허용(대기 규칙).
@@ -179,7 +180,7 @@ def add_urls(self, urls: list[str]) -> int
 | 입력이 채널/영상 주소가 아님 (`/c/`, `/user/` 포함) | 요청 없이 `status` 안내 |
 | 채널 없음 (`ChannelNotFound`) / 영상 없음 | 경고 "채널을 찾을 수 없습니다: …" |
 | API 키 오류 / 할당량 초과 | 기존 분석과 같은 문구 |
-| 댓글 막힌 영상 | 댓글 표 비우고 `status` "댓글이 막힌 영상입니다" (타임스탬프 수 0) |
+| 댓글 막힌 영상 | 댓글 표 비우고 `status` "{short_name}: 댓글이 없거나 막힌 영상입니다" (타임스탬프 수 0) |
 | 네트워크 오류 | 메시지 그대로 표시, 목록은 유지 |
 | 창 닫는 중 워커 진행 | 취소 신호 + 시그널 차단 (메인 창 패턴) |
 

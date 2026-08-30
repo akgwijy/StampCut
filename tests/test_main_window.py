@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -526,6 +527,45 @@ def test_every_stale_hook_marks_preview(qtbot, tmp_path, monkeypatch, make_video
     assert "다시 만들기" in w.preview.full_status.text()
 
 
+def test_channel_finder_requires_api_key(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    w = MainWindow(Settings())
+    qtbot.addWidget(w)
+    monkeypatch.setattr(w, "open_settings", lambda: None)
+    w.open_channel_finder()
+    assert warned and "API 키" in warned[0] and w._channel_dialog is None
+
+
+def test_channel_finder_opens_with_default_ref_and_adds_urls(qtbot, monkeypatch):
+    monkeypatch.setattr(main_window.settings_mod, "save", lambda s, path=None: None)  # 실제 설정 파일을 건드리지 않는다
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.show()
+    assert w.channel_action.text() == "채널 영상 찾기" and w.channel_action.isEnabled()
+    w.url_panel.urls_edit.setPlainText("https://youtu.be/AAAAAAAAAAA")
+    w.open_channel_finder()
+    dlg = w._channel_dialog
+    assert dlg is not None and dlg.isVisible() and dlg.ref_edit.text() == "https://youtu.be/AAAAAAAAAAA"
+    dlg.urls_selected.emit(["https://youtu.be/AAAAAAAAAAA", "https://www.youtube.com/watch?v=BBBBBBBBBBB"])
+    assert w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA", "https://www.youtube.com/watch?v=BBBBBBBBBBB"]
+    assert w.status_panel.message.text() == "URL 1개 추가됨 — 댓글 분석을 누르세요"
+    dlg.urls_selected.emit(["https://youtu.be/BBBBBBBBBBB"])
+    assert w.status_panel.message.text() == "이미 목록에 있는 영상입니다"
+    w.open_channel_finder()
+    assert w._channel_dialog is dlg  # 같은 API 키면 창을 재사용
+    w.apply_settings(replace(w.settings, api_key="OTHER"))
+    w.open_channel_finder()
+    assert w._channel_dialog is not dlg  # 키가 바뀌면 새 클라이언트로 다시 만든다
+    dlg2 = w._channel_dialog
+    w._set_busy(True)
+    assert w.channel_action.isEnabled()  # 분석·렌더 중에도 열 수 있다
+    w.close()
+    assert not dlg2.isVisible()
+
+
 def test_video_and_settings_split_half_and_half(qtbot):
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
@@ -540,3 +580,49 @@ def test_video_and_settings_split_half_and_half(qtbot):
     qtbot.waitUntil(lambda: w.splitter.sizes()[1] > b, timeout=2000)
     a2, b2 = w.splitter.sizes()
     assert a2 == a and b2 >= b + 390  # 왼쪽은 그대로, 미리보기만 커진다
+
+
+def test_channel_urls_do_not_clobber_render_progress_or_result(qtbot):
+    from stampcut.gui.workers import Worker
+
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w._render_worker = Worker(lambda progress, cancel: None)  # 실행 전 → 렌더 중으로 간주
+    w.status_panel.set_progress("render", 50, 100, "렌더링 중")
+    w._on_channel_urls(["https://youtu.be/AAAAAAAAAAA"])
+    assert w.status_panel.progress.value() == 65 and w.status_panel.message.text() == "렌더링 중"
+    assert w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA"]  # URL은 추가된다
+    w._render_worker.done = True
+    w.status_panel.set_done(Path("C:/out/x.mp4"))
+    w._on_channel_urls(["https://youtu.be/BBBBBBBBBBB"])
+    assert w.status_panel.has_result() and not w.status_panel.open_folder_btn.isHidden()
+    assert w.status_panel.message.text() == "URL 1개 추가됨 — 댓글 분석을 누르세요"
+
+
+def test_declining_quit_keeps_channel_dialog_open(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from stampcut.gui.workers import Worker
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.open_channel_finder()
+    dlg = w._channel_dialog
+    worker = Worker(lambda progress, cancel: None)  # 실행 전 → 진행 중으로 간주
+    w._workers.append(worker)
+    w.close()
+    assert dlg.isVisible()  # 종료를 취소하면 채널 창도 그대로
+    worker.done = True  # teardown에서 창을 닫을 때 종료 확인창(모달)이 뜨지 않게
+
+
+def test_channel_urls_do_not_clobber_running_analysis(qtbot):
+    from stampcut.gui.workers import Worker
+
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    worker = Worker(lambda progress, cancel: None)  # 분석 워커가 도는 중
+    w._workers.append(worker)
+    w.status_panel.set_progress("analyze", 1, 2, "댓글 수집 중")
+    w._on_channel_urls(["https://youtu.be/AAAAAAAAAAA"])
+    assert w.status_panel.message.text() == "댓글 수집 중" and w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA"]
+    worker.done = True  # teardown에서 창을 닫을 때 종료 확인창(모달)이 뜨지 않게
