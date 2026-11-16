@@ -23,6 +23,7 @@ def overall_percent(stage: str, done: int, total: int) -> int:
 
 class StatusPanel(QWidget):
     render_requested = Signal()
+    cancel_requested = Signal()
     output_dir_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -38,6 +39,9 @@ class StatusPanel(QWidget):
         self.render_btn = QPushButton("하이라이트 만들기")
         self.render_btn.setEnabled(False)
         self.render_btn.clicked.connect(self.render_requested)
+        self.cancel_btn = QPushButton("작업 취소")
+        self.cancel_btn.clicked.connect(self.cancel_requested)
+        self.cancel_btn.hide()
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.message = QLabel("")
@@ -56,6 +60,7 @@ class StatusPanel(QWidget):
         bottom = QHBoxLayout()
         bottom.addWidget(self.progress, 1)
         bottom.addWidget(self.message, 2)
+        bottom.addWidget(self.cancel_btn)
         bottom.addWidget(self.open_folder_btn)
         bottom.addWidget(self.play_btn)
         layout = QVBoxLayout(self)
@@ -82,6 +87,8 @@ class StatusPanel(QWidget):
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
+        self.cancel_btn.setVisible(busy)
+        self.cancel_btn.setEnabled(busy)
         self.render_btn.setEnabled(self._clip_count > 0 and not busy)
         if busy:
             self._result = None

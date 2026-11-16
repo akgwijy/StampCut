@@ -5,6 +5,13 @@ import pytest
 from stampcut.core.models import Clip, VideoInfo
 
 
+@pytest.fixture(autouse=True)
+def isolated_app_data(tmp_path, monkeypatch):
+    """Keep settings, cache, previews, and logs inside each test's temporary data."""
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+
+
 @pytest.fixture
 def make_video():
     def _make(**overrides) -> VideoInfo:

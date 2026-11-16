@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from stampcut.core import settings as settings_mod
-from stampcut.core.models import AudioMix, Clip, ClipStatus, Mention, Project, VideoInfo
+from stampcut.core.models import CAPTION_STYLE_FIELDS, AudioMix, Clip, ClipStatus, Mention, Project, VideoInfo
 
 VERSION = 2
 SUPPORTED_VERSIONS = (1, 2)  # v1: audio 없음 → 기본값
@@ -55,6 +55,8 @@ def _clip_dict(c: Clip) -> dict:
         "preview_end": c.preview_end,
         "final_path": str(c.final_path) if c.final_path else None,
         "mentions": [asdict(m) for m in c.mentions],
+        "mode_settings": c.mode_settings,
+        **{name: getattr(c, name) for name in CAPTION_STYLE_FIELDS},
     }
 
 
@@ -66,6 +68,11 @@ def save(project: Project, path: Path) -> None:
         "videos": [{**asdict(v), "published_at": v.published_at.isoformat()} for v in project.videos],
         "clips": [_clip_dict(c) for c in project.clips],
         "audio": asdict(project.audio),
+        "output_mode": project.output_mode,
+        "source_kind": project.source_kind,
+        "source_channel": project.source_channel,
+        "source_start": project.source_start,
+        "source_end": project.source_end,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -103,6 +110,12 @@ def _load_clip(d: dict, by_id: dict[str, VideoInfo]) -> Clip | None:
         zoom=float(d.get("zoom", 1.0)),
         pan_x=float(d.get("pan_x", 0.5)),
         pan_y=float(d.get("pan_y", 0.5)),
+        caption_x=int(d["caption_x"]) if d.get("caption_x") is not None else None,
+        caption_y=int(d["caption_y"]) if d.get("caption_y") is not None else None,
+        caption_font_size=int(d["caption_font_size"]) if d.get("caption_font_size") is not None else None,
+        caption_font_path=str(d["caption_font_path"]) if d.get("caption_font_path") is not None else None,
+        caption_color=str(d["caption_color"]) if d.get("caption_color") is not None else None,
+        mode_settings=d.get("mode_settings") if isinstance(d.get("mode_settings"), dict) else {},
         status=status,
         preview_path=preview_path,
         preview_start=preview_start,
@@ -124,6 +137,13 @@ def load(path: Path) -> Project | None:
             videos.append(VideoInfo(**v))
         by_id = {v.video_id: v for v in videos}
         clips = [c for raw in data["clips"] if (c := _load_clip(raw, by_id)) is not None]
-        return Project(urls=list(data["urls"]), title=str(data["title"]), videos=videos, clips=clips, audio=_audio_from(data.get("audio")))
+        return Project(
+            urls=list(data["urls"]), title=str(data["title"]), videos=videos, clips=clips,
+            audio=_audio_from(data.get("audio")),
+            output_mode="video" if data.get("output_mode") == "video" else "shorts",
+            source_kind="channel" if data.get("source_kind") == "channel" else "urls",
+            source_channel=str(data.get("source_channel") or ""),
+            source_start=str(data.get("source_start") or ""), source_end=str(data.get("source_end") or ""),
+        )
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None

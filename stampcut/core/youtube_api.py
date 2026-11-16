@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime
 
 import requests
 
+from stampcut.core.ffmpeg import Cancelled
 from stampcut.core.models import ChannelInfo, RawComment, VideoInfo
 
 BASE_URL = "https://www.googleapis.com/youtube/v3"
@@ -109,8 +111,11 @@ class YouTubeClient:
         self.api_key = api_key
         self.session = session or requests.Session()
         self.base_url = base_url
+        self.cancel_event: threading.Event | None = None
 
     def _get(self, resource: str, **params) -> dict:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise Cancelled()
         params["key"] = self.api_key
         try:
             r = self.session.get(f"{self.base_url}/{resource}", params=params, timeout=30)

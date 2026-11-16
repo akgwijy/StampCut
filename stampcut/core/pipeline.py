@@ -18,7 +18,8 @@ from typing import Callable
 from stampcut.core import ffmpeg as ff
 from stampcut.core.downloader import DownloadCancelled, DownloadFailed, Downloader, preview_covers
 from stampcut.core.highlights import build_clips
-from stampcut.core.models import KST, Clip, ClipStatus, Mention, Project, Settings, VideoInfo
+from stampcut.core.models import CAPTION_STYLE_FIELDS, KST, Clip, ClipStatus, Mention, Project, Settings, VideoInfo
+from stampcut.core.output_modes import normalize_output_settings
 from stampcut.core.renderer import PREVIEW_PROFILE, build_clip_command, build_concat_command, build_mix_command, write_concat_list
 from stampcut.core.settings import preview_dir, render_dir, resolve_font
 from stampcut.core.timestamps import extract_mentions, format_time
@@ -50,27 +51,34 @@ def analyze(
     progress: ProgressFn = _noop,
     cancel: threading.Event | None = None,
 ) -> Project:
+    s = normalize_output_settings(s)
     total = len(urls) + 1
     progress("analyze", 0, total, "영상 정보 가져오는 중")
     _check(cancel)
     videos = client.fetch_video_infos(urls, strict=False)
+    _check(cancel)
     found = {v.video_id for v in videos}
     missing = [u for u in urls if parse_video_id(u) not in found]
     mentions: list[Mention] = []
     for i, v in enumerate(videos):
         _check(cancel)
         progress("analyze", i + 1, total, f"{v.short_name} 댓글 수집 중")
-        for c in client.fetch_all_comments(v.video_id):
+        comments = client.fetch_all_comments(v.video_id)
+        _check(cancel)
+        for c in comments:
             mentions.extend(extract_mentions(v, c))
+    _check(cancel)
     clips = build_clips(mentions, videos, s)
     log.info("analyze: %d videos, %d mentions, %d clips", len(videos), len(mentions), len(clips))
     progress("analyze", total, total, f"후보 {len(clips)}개")
+    _check(cancel)
     return Project(
         urls=list(urls),
         title=title.strip() or default_title(videos, s),
         videos=videos,
         clips=clips,
         warnings=[f"영상을 찾을 수 없어 건너뜀: {u}" for u in missing],
+        output_mode=s.output_mode,
     )
 
 
@@ -197,13 +205,18 @@ def render(
 
 def preview_signature(project: Project, s: Settings) -> str:
     """전체 미리보기 파일이 지금 편집 상태와 맞는지 비교하기 위한 해시. 화면에 보이는 것만 (BGM·끈 클립 제외)."""
+    s = normalize_output_settings(s)
     payload = {
+        "output_mode": s.output_mode,
         "title": project.title,
         "clips": [
-            [c.video.video_id, c.t, c.effective_pre(s), c.effective_post(s), c.zoom, c.pan_x, c.pan_y, c.caption]
+            [c.video.video_id, c.t, c.effective_pre(s), c.effective_post(s), c.zoom, c.pan_x, c.pan_y, c.caption,
+             *[getattr(c, name) for name in CAPTION_STYLE_FIELDS]]
             for c in project.enabled_clips()
         ],
-        "style": [s.title_y, s.title_color, s.caption_y, s.caption_color, s.background_color, s.show_time_in_caption, s.font_path],
+        "style": [s.title_x, s.title_y, s.title_color, s.title_font_size, s.title_font_path,
+                  s.caption_x, s.caption_y, s.caption_color, s.caption_font_size, s.caption_font_path,
+                  s.background_color, s.show_time_in_caption, s.font_path],
     }
     return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 

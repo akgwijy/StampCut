@@ -277,7 +277,7 @@ def test_style_change_saves_settings(qtbot, monkeypatch):
     w.preview.title_y_spin.setValue(300)
     assert saved and saved[-1] is w.settings and w.settings.title_y == 300
     saved.clear()
-    w.preview._on_text_drag("caption", -30.0)
+    w.preview._on_text_drag("caption", 0, -30.0)
     assert not saved  # 드래그 중에는 저장하지 않음
     w.preview._on_text_drag_end()
     assert saved and w.settings.caption_y == 1522

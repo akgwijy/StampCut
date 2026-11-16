@@ -9,6 +9,8 @@ from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QLabel,
     QGroupBox,
     QHeaderView,
     QMainWindow,
@@ -22,10 +24,12 @@ from PySide6.QtWidgets import (
 
 from stampcut import __version__
 from stampcut.core import pipeline
+from stampcut.core.channel import find_channel_videos_in_period
+from stampcut.core.output_modes import normalize_output_settings, switch_output_mode
 from stampcut.core import project_io
 from stampcut.core import settings as settings_mod
 from stampcut.core.downloader import Downloader, preview_covers
-from stampcut.core.ffmpeg import find_ffmpeg
+from stampcut.core.ffmpeg import Cancelled, find_ffmpeg
 from stampcut.core.models import Clip, ClipStatus, Project, Settings
 from stampcut.core.renderer import unique_output_path
 from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
@@ -36,6 +40,7 @@ from stampcut.gui.preview_widget import PreviewWidget, load_font_family
 from stampcut.gui.settings_dialog import SettingsDialog
 from stampcut.gui.status_bar import StatusPanel
 from stampcut.gui.url_panel import UrlPanel
+from stampcut.gui.period_video_dialog import PeriodVideoDialog
 from stampcut.gui.workers import Worker
 
 log = logging.getLogger(__name__)
@@ -48,9 +53,18 @@ class _ClipBridge(QObject):
     updated = Signal(object)
 
 
-def _analyze_job(urls, title, settings, client, progress, cancel):
+def _analyze_job(urls, title, settings, client, progress, cancel, source=None):
     try:
-        return pipeline.analyze(urls, title, settings, client, progress=progress, cancel=cancel)
+        if hasattr(client, "cancel_event"):
+            client.cancel_event = cancel
+        project = pipeline.analyze(urls, title, settings, client, progress=progress, cancel=cancel)
+        project.output_mode = settings.output_mode
+        if source:
+            for name in ("source_kind", "source_channel", "source_start", "source_end"):
+                setattr(project, name, source.get(name, ""))
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        return project
     except ApiKeyError as e:
         raise RuntimeError(f"API 키가 잘못되었거나 YouTube Data API v3가 사용 설정되지 않았습니다.\n설정에서 키를 확인하세요.\n({e})") from e
     except QuotaError as e:
@@ -66,12 +80,14 @@ class MainWindow(QMainWindow):
 
     def __init__(self, settings: Settings | None = None, project_file: Path | None = None) -> None:
         super().__init__()
-        self.settings = settings if settings is not None else settings_mod.load()
+        self.settings = normalize_output_settings(settings if settings is not None else settings_mod.load())
+        self._adopting_project = False
         self.project_file = project_file
         self.project: Project | None = None
         self.pool = QThreadPool.globalInstance()
         self._workers: list[Worker] = []
         self._render_worker: Worker | None = None
+        self._foreground_worker: Worker | None = None
         self._render_candidates: set[str] = set()
         self._bridge = _ClipBridge()
         self._bridge.updated.connect(self._on_clip_updated)
@@ -82,17 +98,27 @@ class MainWindow(QMainWindow):
         self._rebuild_tools()
 
         self.setWindowTitle(f"StampCut {__version__}")
-        self.resize(1280, 820)
+        self.resize(1280, 900)
         toolbar = QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         self.settings_action = toolbar.addAction("⚙ 설정", self.open_settings)
         self.channel_action = toolbar.addAction("채널 영상 찾기", self.open_channel_finder)
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" 제작 형식 "))
+        self.output_mode_combo = QComboBox()
+        self.output_mode_combo.addItem("쇼츠 · 9:16", "shorts")
+        self.output_mode_combo.addItem("일반 영상 · 16:9", "video")
+        self.output_mode_combo.setCurrentIndex(1 if self.settings.output_mode == "video" else 0)
+        toolbar.addWidget(self.output_mode_combo)
+        self.output_mode_combo.currentIndexChanged.connect(self._on_output_mode_changed)
         self._channel_dialog: ChannelDialog | None = None
         self._channel_dialog_key = ""
 
         self.url_panel = UrlPanel()
         self.url_panel.analyze_requested.connect(self.start_analysis)
+        self.url_panel.period_requested.connect(self.find_period_videos)
+        self.url_panel.source_changed.connect(self._on_urls_changed)
         self.url_panel.title_edit.textChanged.connect(self._on_title_changed)
         self.url_panel.urls_edit.textChanged.connect(self._on_urls_changed)
 
@@ -134,6 +160,7 @@ class MainWindow(QMainWindow):
 
         self.status_panel = StatusPanel()
         self.status_panel.render_requested.connect(self.start_render)
+        self.status_panel.cancel_requested.connect(self.cancel_work)
         self.status_panel.output_dir_changed.connect(self._on_output_dir_changed)
         self.status_panel.set_output_dir(settings_mod.resolve_output_dir(self.settings))
         self.status_panel.update_summary(None, self.settings)
@@ -184,7 +211,11 @@ class MainWindow(QMainWindow):
             self.apply_settings(dlg.result_settings())
 
     def apply_settings(self, s: Settings) -> None:
-        self.settings = s
+        self.settings = normalize_output_settings(s)
+        s = self.settings
+        blocked = self.output_mode_combo.blockSignals(True)
+        self.output_mode_combo.setCurrentIndex(1 if s.output_mode == "video" else 0)
+        self.output_mode_combo.blockSignals(blocked)
         if self._channel_dialog is not None and self._channel_dialog_key != s.api_key:
             self._channel_dialog.close()  # 옛 API 키의 클라이언트를 계속 쓰지 않도록
             self._channel_dialog.deleteLater()
@@ -198,6 +229,27 @@ class MainWindow(QMainWindow):
         self.bgm_panel.set_bgm_dir(s.bgm_dir)
         self._check_full_preview()
 
+    def _on_output_mode_changed(self, _index: int) -> None:
+        self._set_output_mode(self.output_mode_combo.currentData())
+
+    def _set_output_mode(self, mode: str, *, preserve_clips: bool = True, persist: bool = True) -> None:
+        previous = self.settings.output_mode
+        clips = self.project.clips if self.project is not None and preserve_clips else ()
+        self.settings = switch_output_mode(self.settings, mode, clips)
+        if self.project is not None:
+            self.project.output_mode = self.settings.output_mode
+        blocked = self.output_mode_combo.blockSignals(True)
+        self.output_mode_combo.setCurrentIndex(1 if self.settings.output_mode == "video" else 0)
+        self.output_mode_combo.blockSignals(blocked)
+        if previous != self.settings.output_mode:
+            self.preview.clear_full_preview()
+        self.model.set_settings(self.settings)
+        self.preview.set_settings(self.settings)
+        self.status_panel.update_summary(self.project, self.settings)
+        if persist:
+            settings_mod.save(self.settings)
+            self._schedule_autosave()
+
     def _on_style_changed(self) -> None:
         # PreviewWidget이 공유 Settings 객체를 직접 고쳤으므로 저장만 하면 된다
         settings_mod.save(self.settings)
@@ -205,6 +257,15 @@ class MainWindow(QMainWindow):
 
     # --- 분석 ---
     def start_analysis(self) -> None:
+        source = self.url_panel.source_panel
+        if source.is_channel():
+            message = source.validation_error()
+            if message:
+                self._warn(message)
+                return
+            if not source.selection_ready():
+                self._warn("먼저 영상을 조회하고 분석할 영상을 선택하세요.")
+                return
         if self.url_panel.highlight_invalid():
             self._warn("URL 형식이 잘못된 줄이 있습니다 (빨간 줄).")
             return
@@ -218,13 +279,21 @@ class MainWindow(QMainWindow):
             return
         self._set_busy(True)
         self.status_panel.set_idle("댓글 분석 중")
-        w = Worker(_analyze_job, urls, self.url_panel.title(), self.settings, YouTubeClient(self.settings.api_key))
+        w = Worker(_analyze_job, urls, self.url_panel.title(), self.settings, YouTubeClient(self.settings.api_key), source=source.metadata())
         w.signals.finished.connect(self._on_analyzed)
         w.signals.failed.connect(self._on_analyze_failed)
-        w.signals.cancelled.connect(lambda: self._set_busy(False))
+        w.signals.cancelled.connect(self._on_analysis_cancelled)
+        self._foreground_worker = w
         self._start(w)
 
+    def _on_analysis_cancelled(self) -> None:
+        self._set_busy(False)
+        self.status_panel.set_idle("분석 취소됨")
+
     def _on_analyzed(self, project: Project) -> None:
+        if self._foreground_worker is not None and self._foreground_worker.cancel.is_set():
+            self._on_analysis_cancelled()
+            return
         self._adopt_project(project)
         self._set_busy(False)
         if not project.clips:
@@ -239,8 +308,14 @@ class MainWindow(QMainWindow):
     def _adopt_project(self, project: Project, restored: bool = False) -> None:
         """분석 결과 채택과 저장 파일 복원이 공유하는 공통 경로."""
         self.project = project
+        self._set_output_mode(project.output_mode, preserve_clips=False, persist=False)
         if restored:
-            self.url_panel.urls_edit.setPlainText("\n".join(project.urls))
+            self._adopting_project = True
+            try:
+                self.url_panel.restore_source(project)
+                self.url_panel.urls_edit.setPlainText("\n".join(project.urls))
+            finally:
+                self._adopting_project = False
         self.url_panel.set_title(project.title)
         self.model.set_clips(project.clips)
         self.preview.set_title(project.title)
@@ -270,12 +345,12 @@ class MainWindow(QMainWindow):
         self._start(w)
 
     def _on_previews_finished(self, _result) -> None:
-        if self._rendering() or self.status_panel.has_result():
+        if self._foreground_worker is not None or self._rendering() or self.status_panel.has_result():
             return
         self.status_panel.set_idle("미리보기 준비됨")
 
     def _on_previews_failed(self, msg: str) -> None:
-        if self._rendering() or self.status_panel.has_result():
+        if self._foreground_worker is not None or self._rendering() or self.status_panel.has_result():
             return
         self.status_panel.set_idle(f"미리보기 오류: {msg}")
 
@@ -325,8 +400,12 @@ class MainWindow(QMainWindow):
         self._schedule_autosave()
 
     def _on_urls_changed(self) -> None:
+        if self._adopting_project:
+            return
         if self.project:
             self.project.urls = self.url_panel.urls()
+            for name, value in self.url_panel.source_panel.metadata().items():
+                setattr(self.project, name, value)
             self._schedule_autosave()
 
     def _on_output_dir_changed(self, d: str) -> None:
@@ -334,6 +413,61 @@ class MainWindow(QMainWindow):
         settings_mod.save(self.settings)
 
     # --- 채널 영상 찾기 ---
+    def find_period_videos(self) -> None:
+        source = self.url_panel.source_panel
+        message = source.validation_error()
+        if message:
+            self._warn(message)
+            return
+        if not self.settings.api_key:
+            self._warn("YouTube API 키가 필요합니다. 설정에서 입력하세요.")
+            self.open_settings()
+            return
+        query = source.query_key()
+        self._set_busy(True)
+        self.status_panel.set_idle("기간에 해당하는 영상 조회 중")
+        channel, start, end = source.query()
+        worker = Worker(find_channel_videos_in_period, YouTubeClient(self.settings.api_key), channel, start, end)
+        worker.signals.finished.connect(lambda result, query=query: self._on_period_videos(result, query))
+        worker.signals.failed.connect(self._on_period_failed)
+        worker.signals.cancelled.connect(self._on_period_cancelled)
+        self._foreground_worker = worker
+        self._start(worker)
+
+    def _on_period_videos(self, page, query) -> None:
+        self._set_busy(False)
+        source = self.url_panel.source_panel
+        if not source.is_channel() or source.query_key() != query:
+            self.status_panel.set_idle("조회 조건이 바뀌었습니다 — 다시 조회하세요")
+            return
+        if not page.videos:
+            source.set_videos([], page.channel.title)
+            self.status_panel.set_idle("기간에 해당하는 댓글 있는 영상이 없습니다")
+            return
+        dialog = PeriodVideoDialog(page.videos, page.channel.title, self)
+        if dialog.exec() != PeriodVideoDialog.Accepted:
+            self.status_panel.set_idle("영상 선택 취소됨")
+            return
+        if not source.is_channel() or source.query_key() != query:
+            self.status_panel.set_idle("조회 조건이 바뀌었습니다 — 다시 조회하세요")
+            return
+        videos = dialog.selected_videos()
+        if not videos:
+            self._warn("분석할 영상을 하나 이상 선택하세요.")
+            return
+        source.set_videos(videos, page.channel.title)
+        self.url_panel.urls_edit.setPlainText("\n".join(v.url for v in videos))
+        self.status_panel.set_idle(f"영상 {len(videos)}개 선택됨 — 댓글 분석을 누르세요")
+
+    def _on_period_failed(self, message: str) -> None:
+        self._set_busy(False)
+        self.status_panel.set_idle("영상 조회 실패")
+        self._warn(f"채널 영상 조회 실패:\n{message}")
+
+    def _on_period_cancelled(self) -> None:
+        self._set_busy(False)
+        self.status_panel.set_idle("영상 조회 취소됨")
+
     def open_channel_finder(self) -> None:
         if not self.settings.api_key:
             self._warn("YouTube API 키가 필요합니다. 설정에서 입력하세요.")
@@ -396,6 +530,7 @@ class MainWindow(QMainWindow):
         w.signals.finished.connect(self._on_full_preview_done)
         w.signals.failed.connect(self._on_full_preview_failed)
         w.signals.cancelled.connect(lambda: self._set_busy(False))
+        self._foreground_worker = w
         self._start(w)
 
     def _on_full_preview_done(self, path: Path) -> None:
@@ -453,6 +588,7 @@ class MainWindow(QMainWindow):
         w.signals.failed.connect(self._on_render_failed)
         w.signals.cancelled.connect(lambda: (self._set_busy(False), self.status_panel.set_idle("취소됨")))
         self._render_worker = w
+        self._foreground_worker = w
         self._start(w)
 
     def _on_rendered(self, path: Path) -> None:
@@ -490,12 +626,16 @@ class MainWindow(QMainWindow):
         self.pool.start(w)
 
     def _on_worker_progress(self, worker: Worker, stage: str, done: int, total: int, message: str) -> None:
-        """렌더 중에는 렌더 워커의 진행률만 상태줄에 반영한다 (미리보기 틱이 덮어쓰지 않도록)."""
+        """주 작업의 진행률을 백그라운드 미리보기가 덮어쓰지 않도록 한다."""
         if self._rendering() and worker is not self._render_worker:
+            return
+        if self._foreground_worker is not None and worker is not self._foreground_worker:
             return
         self.status_panel.set_progress(stage, done, total, message)
 
     def _set_busy(self, busy: bool) -> None:
+        if not busy:
+            self._foreground_worker = None
         if busy:
             self.preview.pause()  # 렌더/전체 미리보기 생성 중에는 미리보기(와 BGM 동기 재생)도 멈춘다
         self.url_panel.set_busy(busy)
@@ -504,7 +644,18 @@ class MainWindow(QMainWindow):
         self.preview.setEnabled(not busy)
         self.preview.controls_panel.setEnabled(not busy and self.preview.mode() == "clip")
         self.settings_action.setEnabled(not busy)
+        self.output_mode_combo.setEnabled(not busy)
         self.bgm_panel.set_busy(busy)
+
+    def cancel_work(self) -> None:
+        # A completed foreground job can still have its terminal GUI callback queued.
+        if self._foreground_worker is not None:
+            self._foreground_worker.cancel.set()
+        for worker in self._workers:
+            if not worker.done:
+                worker.cancel.set()
+        self.status_panel.cancel_btn.setEnabled(False)
+        self.status_panel.message.setText("취소하는 중…")
 
     def _schedule_autosave(self) -> None:
         if self.project_file is not None and self.project is not None:

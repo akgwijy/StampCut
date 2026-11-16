@@ -91,7 +91,7 @@ class ClipTableModel(QAbstractTableModel):
             if col == COL_CAPTION:
                 return clip.caption
             if col == COL_PRE:
-                return clip.effective_pre(s)
+                return -clip.effective_pre(s)
             if col == COL_POST:
                 return clip.effective_post(s)
             if col == COL_STATUS:
@@ -104,6 +104,8 @@ class ClipTableModel(QAbstractTableModel):
             if col == COL_STATUS and clip.status is ClipStatus.ERROR:
                 return QColor("#d00000")
         if role == Qt.ToolTipRole:
+            if col == COL_PRE:
+                return '댓글 시각 기준 시작 위치: -5초 = 5초 전, 0초 = 댓글 시각, 5초 = 5초 후'
             if col == COL_STATUS and clip.error:
                 return clip.error
             if col == COL_CAPTION:
@@ -123,7 +125,7 @@ class ClipTableModel(QAbstractTableModel):
         elif role == Qt.EditRole and col == COL_CAPTION:
             clip.caption = str(value).strip()
         elif role == Qt.EditRole and col == COL_PRE:
-            clip.pre = max(0, min(120, int(value)))
+            clip.pre = -max(-120, min(120, int(value)))
         elif role == Qt.EditRole and col == COL_POST:
             clip.post = max(0, min(120, int(value)))
         else:
@@ -136,7 +138,7 @@ class ClipTableModel(QAbstractTableModel):
 class SecondsDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         sb = QSpinBox(parent)
-        sb.setRange(0, 120)
+        sb.setRange(-120 if index is not None and index.column() == COL_PRE else 0, 120)
         sb.setSuffix("초")
         sb.setButtonSymbols(QAbstractSpinBox.NoButtons)  # 칸이 좁아 화살표 대신 직접 타이핑
         return sb

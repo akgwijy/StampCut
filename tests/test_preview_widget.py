@@ -1,3 +1,5 @@
+import pytest
+
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtMultimedia import QMediaPlayer
@@ -35,14 +37,14 @@ def test_widget_controls_update_clip(qtbot, make_video, make_clip):
     qtbot.addWidget(w)
     clip = make_clip(make_video(), t=758, caption="원더골")
     w.set_clip(clip)
-    assert (w.pre_spin.value(), w.post_spin.value(), w.zoom_slider.value()) == (3, 15, 100)
+    assert (w.pre_spin.value(), w.post_spin.value(), w.zoom_slider.value()) == (-3, 15, 100)
     assert w.caption_edit.text() == "원더골"
     assert not w.pre_spin.keyboardTracking() and not w.post_spin.keyboardTracking()
     with qtbot.waitSignal(w.clip_changed, timeout=1000):
         w.zoom_slider.setValue(200)
     assert clip.zoom == 2.0
     with qtbot.waitSignal(w.clip_changed, timeout=1000):
-        w.pre_spin.setValue(5)
+        w.pre_spin.setValue(-5)
     assert clip.pre == 5
     with qtbot.waitSignal(w.clip_changed, timeout=1000):
         w.caption_edit.setText("종범 골")
@@ -105,6 +107,7 @@ def test_caption_style_moves_caption_and_time(qtbot, make_video, make_clip):
     w = PreviewWidget(s, "Malgun Gothic")
     qtbot.addWidget(w)
     w.set_clip(make_clip(make_video(), t=758, caption="원더골"))
+    w.caption_scope_combo.setCurrentIndex(1)
     with qtbot.waitSignal(w.style_changed, timeout=1000):
         w.caption_y_spin.setValue(1400)
     assert s.caption_y == 1400
@@ -149,14 +152,14 @@ def test_dragview_routes_text_drag_vs_video_pan(qtbot):
         scene,
         lambda dx, dy: calls.append(("pan", dx, dy)),
         hit_test=lambda pos: target["v"],
-        on_text_drag=lambda kind, dy: calls.append((kind, dy)),
+        on_text_drag=lambda kind, dx, dy: calls.append((kind, dx, dy)),
         on_drag_end=lambda: calls.append(("end",)),
     )
     qtbot.addWidget(view)
     view.mousePressEvent(_mouse(QEvent.MouseButtonPress, QPoint(10, 10)))
     view.mouseMoveEvent(_mouse(QEvent.MouseMove, QPoint(10, 25)))
     view.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, QPoint(10, 25)))
-    assert ("title", 15.0) in calls and ("end",) in calls
+    assert ("title", 0.0, 15.0) in calls and ("end",) in calls
     assert not [c for c in calls if c[0] == "pan"]
     calls.clear()
     target["v"] = None  # 텍스트 밖 → 영상 팬
@@ -181,11 +184,11 @@ def test_text_drag_updates_settings_and_emits_on_release(qtbot):
     w = PreviewWidget(s, "Malgun Gothic")
     qtbot.addWidget(w)
     w.set_title("문성FC 하이라이트")
-    w._on_text_drag("title", 50.0)
+    w._on_text_drag("title", 0, 50.0)
     assert s.title_y == 260 and w.title_y_spin.value() == 260  # 스핀박스 동기화
     with qtbot.waitSignal(w.style_changed, timeout=1000):
         w._on_text_drag_end()
-    w._on_text_drag("caption", -100000.0)
+    w._on_text_drag("caption", 0, -100000.0)
     assert s.caption_y == 0  # 클램프
 
 
@@ -221,7 +224,7 @@ def test_seek_slider_and_buttons_drive_player(qtbot, monkeypatch, make_video, ma
     assert calls[-1] == 65000
     w._seek_by(-5)
     assert calls[-1] == 55000  # 시작 클램프
-    w.pre_spin.setValue(5)  # 앞 5초 → 구간 53000..73000, 길이 20000
+    w.pre_spin.setValue(-5)  # 앞 5초 → 구간 53000..73000, 길이 20000
     assert w.seek_slider.maximum() == 20000
 
 
@@ -248,6 +251,7 @@ def test_set_settings_refreshes_seek_range(qtbot, make_video, make_clip):
     assert w.seek_slider.maximum() == 18000
     w.set_settings(Settings(pre_seconds=5))  # 전역 앞 5초 → 구간 53000..73000
     assert w.seek_slider.maximum() == 20000
+    assert w.pre_spin.value() == -5
 
 
 def test_seek_slider_steps_are_in_seconds(qtbot):
@@ -450,3 +454,48 @@ def test_pause_and_playback_started_signal(qtbot, tmp_path, make_video, make_cli
     monkeypatch.setattr(w.bgm_player, "pause", lambda: pauses.append("bgm"))
     w.pause()
     assert pauses == ["video", "bgm"] and w.play_btn.text() == "▶ 재생"
+
+
+@pytest.mark.parametrize(('offset', 'timestamp', 'start', 'duration_ms'), [
+    (-5, 60, 55, 20000),
+    (0, 60, 60, 15000),
+    (5, 60, 65, 10000),
+    (-10, 2, 0, 17000),
+])
+def test_start_offset_updates_clip_and_playback_range(qtbot, make_video, make_clip, offset, timestamp, start, duration_ms):
+    settings = Settings()
+    widget = PreviewWidget(settings, 'Malgun Gothic')
+    qtbot.addWidget(widget)
+    clip = make_clip(make_video(), t=timestamp, preview_start=0)
+    widget.set_clip(clip)
+    with qtbot.waitSignal(widget.clip_changed, timeout=1000):
+        widget.pre_spin.setValue(offset)
+    assert clip.start(settings) == start
+    assert widget.seek_slider.maximum() == duration_ms
+    assert widget.pre_spin.value() == offset
+
+
+def test_start_offset_save_reload_preserves_existing_clip(qtbot, tmp_path, make_video, make_clip):
+    from stampcut.core import project_io
+    from stampcut.core.models import Project
+
+    settings = Settings()
+    video = make_video()
+    clip = make_clip(video, t=60, pre=5)
+    project = Project([video.url], 'offset', [video], [clip])
+    path = tmp_path / 'project.json'
+    project_io.save(project, path)
+    restored = project_io.load(path)
+    assert restored is not None
+    widget = PreviewWidget(settings, 'Malgun Gothic')
+    qtbot.addWidget(widget)
+    widget.set_clip(restored.clips[0])
+    assert widget.pre_spin.value() == -5
+    assert restored.clips[0].start(settings) == 55
+    widget.pre_spin.setValue(-8)
+    project_io.save(restored, path)
+    reloaded = project_io.load(path)
+    assert reloaded is not None
+    widget.set_clip(reloaded.clips[0])
+    assert widget.pre_spin.value() == -8
+    assert reloaded.clips[0].start(settings) == 52

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -26,11 +26,24 @@ class Settings:
     parallel_downloads: int = 2
     preview_margin_pre: int = 30
     preview_margin_post: int = 60
+    title_x: int = 540  # 텍스트 블록 가로 중심
+    title_font_size: int = 64
+    title_font_path: str = ""  # 비우면 기존 공통 폰트 사용
+    caption_x: int = 540
+    caption_font_size: int = 60
+    caption_font_path: str = ""
     title_y: int = 210  # 타이틀 블록 세로 중심 (기존 420px 밴드 중앙과 동일)
     title_color: str = "#FFFFFF"
     caption_y: int = 1552  # 자막 블록 상단
     caption_color: str = "#FFFFFF"
     bgm_dir: str = ""  # 마지막으로 고른 배경 음악 폴더
+
+    output_mode: str = "shorts"
+    style_mode: str = "shorts"
+    mode_settings: dict = field(default_factory=dict)
+
+
+CAPTION_STYLE_FIELDS = ("caption_x", "caption_y", "caption_font_size", "caption_font_path", "caption_color")
 
 
 @dataclass
@@ -121,6 +134,18 @@ class Clip:
     preview_end: int | None = None
     final_path: Path | None = None
 
+    caption_x: int | None = None
+    caption_y: int | None = None
+    caption_font_size: int | None = None
+    caption_font_path: str | None = None
+    caption_color: str | None = None
+    mode_settings: dict = field(default_factory=dict)
+
+    def caption_settings(self, s: Settings) -> Settings:
+        """개별로 지정하지 않은 자막 항목은 공통값을 사용한다."""
+        overrides = {name: getattr(self, name) for name in CAPTION_STYLE_FIELDS if getattr(self, name) is not None}
+        return replace(s, **overrides) if overrides else s
+
     def effective_pre(self, s: Settings) -> int:
         return s.pre_seconds if self.pre is None else self.pre
 
@@ -145,6 +170,11 @@ class Project:
     clips: list[Clip]
     warnings: list[str] = field(default_factory=list)
     audio: AudioMix = field(default_factory=AudioMix)
+    output_mode: str = "shorts"
+    source_kind: str = "urls"
+    source_channel: str = ""
+    source_start: str = ""
+    source_end: str = ""
 
     def enabled_clips(self) -> list[Clip]:
         return [c for c in self.clips if c.enabled]
