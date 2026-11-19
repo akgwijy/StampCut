@@ -184,7 +184,7 @@ def test_render_refuses_zero_length_clip(qtbot, monkeypatch, tmp_path, make_vide
 def test_left_column_layout_and_full_width_table(qtbot):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QHeaderView
-    from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME
+    from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME, COL_VIDEO
 
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
@@ -194,17 +194,20 @@ def test_left_column_layout_and_full_width_table(qtbot):
     assert w.preview.controls_panel.window() is w  # 세부 설정이 메인 창 안에 배치됨
     assert w.preview.parentWidget() is not left  # 미리보기는 오른쪽
     header = w.table.horizontalHeader()
-    # 시간·앞·뒤는 편집 가능한 넉넉한 고정 폭, 자막이 남는 폭을 흡수, 나머지는 내용 크기
+    # 영상 제목은 길이에 관계없이 조절 가능한 폭, 시간·앞·뒤는 고정 폭, 자막은 남는 폭을 사용
     fixed_widths = {COL_TIME: 76, COL_PRE: 64, COL_POST: 64}
     for col in range(w.model.columnCount()):
         if col == COL_CAPTION:
             assert header.sectionResizeMode(col) == QHeaderView.Stretch
+        elif col == COL_VIDEO:
+            assert header.sectionResizeMode(col) == QHeaderView.Interactive
+            assert header.sectionSize(col) == 180
         elif col in fixed_widths:
             assert header.sectionResizeMode(col) == QHeaderView.Fixed
             assert header.sectionSize(col) == fixed_widths[col]
         else:
             assert header.sectionResizeMode(col) == QHeaderView.ResizeToContents
-    assert w.table.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    assert w.table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
 
 
 def test_busy_locks_detached_controls_panel(qtbot):

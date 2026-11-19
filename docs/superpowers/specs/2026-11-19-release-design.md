@@ -1,0 +1,15 @@
+# Release to YouTube Shorts and Instagram Reels
+
+User-approved scope: add release to the existing app; editable post text must persist for reuse after closing/restarting and across projects. Earlier title-display and clip-order edits remain intact. No live publication or account creation during implementation/verification.
+
+UI: rendered-result Release button plus toolbar Release action for reopening/selecting an existing MP4/MOV. Release dialog selects YouTube Shorts/Instagram, edits YouTube title and shared post body (YouTube description / Instagram caption), YouTube visibility and made-for-kids value. Persist draft in Settings.publish_draft, debounce edits and flush on every close. Show each target's success/failure/link and retry unfinished targets without duplicating completed identical requests. Upload occurs only on the dialog upload action; rendering never publishes automatically.
+
+Account setup: YouTube imports Desktop OAuth client JSON then opens system browser for PKCE+loopback consent, stores refresh token and channel identity. Instagram supports Facebook-linked professional-account resumable local-file upload (default) or Instagram Login token with a public HTTPS video URL. UI accepts professional account ID and appropriate access token and verifies profile; instructions explain obtaining long-lived tokens and required permissions. Graph API v26.0. Raw tokens/client credentials/resumable sessions reside only in a Windows DPAPI-encrypted local vault, not Settings, projects, repository or logs.
+
+Media: validate actual selected file. YouTube Shorts requires portrait/square and video duration<=180s; use video-track duration rather than AAC padding. Instagram requires3..900s and<=300MB; make cached compatible H264/AAC128k faststart MP4 without modifying source, cancellable via existing FFmpeg helper. URL mode requires user-provided publicly reachable HTTPS media (no server hosting provisioned by the app).
+
+Reliability: sequential selected platforms, cancellable between requests/chunks/polls. Persist provider state and receipts encrypted, keyed by source SHA256+account+platform-specific metadata. Skip successful identical requests on retry. Resume/reconcile known sessions; ambiguous publication must be reported as status-unknown rather than blindly creating a duplicate. Closing a busy dialog requests cancellation and waits for terminal callback so workers cannot update deleted widgets. Previously completed uploads are retained when later work is cancelled.
+
+Implementation: Python3.12/PySide6/requests/stdlib/FFmpeg; no new dependencies. Preserve old settings/projects and ongoing uncommitted edits. Work in current feature checkout; no commit/push unless requested. Automated tests use temporary app-data, mocked HTTP/OAuth and synthetic media only. Account credentials are configured later by the user in the app.
+
+Sources checked2026-11-19: Google native-app OAuth, YouTube resumable upload protocol and videos resource; Meta content publishing and IG User Media references; Graph API versions. These are linked in README setup instructions.

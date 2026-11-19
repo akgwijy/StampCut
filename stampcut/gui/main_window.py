@@ -12,9 +12,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QGroupBox,
+    QHBoxLayout,
     QHeaderView,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QTableView,
     QToolBar,
@@ -35,10 +37,11 @@ from stampcut.core.renderer import unique_output_path
 from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
 from stampcut.gui.bgm_panel import BgmPanel
 from stampcut.gui.channel_dialog import ChannelDialog
-from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME, ClipTableModel, SecondsDelegate
+from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME, COL_VIDEO, ClipTableModel, SecondsDelegate
 from stampcut.gui.preview_widget import PreviewWidget, load_font_family
 from stampcut.gui.settings_dialog import SettingsDialog
 from stampcut.gui.status_bar import StatusPanel
+from stampcut.gui.release_dialog import ReleaseDialog
 from stampcut.gui.url_panel import UrlPanel
 from stampcut.gui.period_video_dialog import PeriodVideoDialog
 from stampcut.gui.workers import Worker
@@ -82,6 +85,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = normalize_output_settings(settings if settings is not None else settings_mod.load())
         self._adopting_project = False
+        self._release_dialog = None
+        self._release_close_requested = False
         self.project_file = project_file
         self.project: Project | None = None
         self.pool = QThreadPool.globalInstance()
@@ -112,6 +117,8 @@ class MainWindow(QMainWindow):
         self.output_mode_combo.setCurrentIndex(1 if self.settings.output_mode == "video" else 0)
         toolbar.addWidget(self.output_mode_combo)
         self.output_mode_combo.currentIndexChanged.connect(self._on_output_mode_changed)
+        toolbar.addSeparator()
+        self.release_action = toolbar.addAction("릴리즈", lambda: self.open_release())
         self._channel_dialog: ChannelDialog | None = None
         self._channel_dialog_key = ""
 
@@ -133,16 +140,29 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         for col in range(self.model.columnCount()):
             header.setSectionResizeMode(col, QHeaderView.Stretch if col == COL_CAPTION else QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(COL_VIDEO, QHeaderView.Interactive)
+        header.resizeSection(COL_VIDEO, 180)  # 긴 원본 제목이 다른 편집 열을 밀어내지 않도록 시작 폭을 제한
         for col, width in ((COL_TIME, 76), (COL_PRE, 64), (COL_POST, 64)):  # 스핀박스 편집이 가능한 고정 폭
             header.setSectionResizeMode(col, QHeaderView.Fixed)
             header.resizeSection(col, width)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.verticalHeader().setVisible(False)
         self.table.selectionModel().currentRowChanged.connect(self._on_row_selected)
         retry = QAction("미리보기 다시 받기", self.table)
         retry.triggered.connect(self._retry_preview)
         self.table.addAction(retry)
         self.table.setContextMenuPolicy(Qt.ActionsContextMenu)
+
+        self.move_up_btn = QPushButton("▲ 위로")
+        self.move_down_btn = QPushButton("▼ 아래로")
+        self.move_up_btn.setToolTip("선택한 클립을 한 칸 위로 이동")
+        self.move_down_btn.setToolTip("선택한 클립을 한 칸 아래로 이동")
+        self.move_up_btn.setEnabled(False)
+        self.move_down_btn.setEnabled(False)
+        self.move_up_btn.clicked.connect(lambda: self._move_selected_clip(-1))
+        self.move_down_btn.clicked.connect(lambda: self._move_selected_clip(1))
+        self.table.selectionModel().selectionChanged.connect(self._update_clip_move_buttons)
+        self.model.modelReset.connect(self._update_clip_move_buttons)
 
         self.preview = PreviewWidget(self.settings, load_font_family(settings_mod.resolve_font(self.settings)))
         self.preview.clip_changed.connect(self._on_clip_edited)
@@ -160,6 +180,7 @@ class MainWindow(QMainWindow):
 
         self.status_panel = StatusPanel()
         self.status_panel.render_requested.connect(self.start_render)
+        self.status_panel.release_requested.connect(self.open_release)
         self.status_panel.cancel_requested.connect(self.cancel_work)
         self.status_panel.output_dir_changed.connect(self._on_output_dir_changed)
         self.status_panel.set_output_dir(settings_mod.resolve_output_dir(self.settings))
@@ -177,6 +198,12 @@ class MainWindow(QMainWindow):
         QVBoxLayout(style_box).addWidget(self.preview.controls_panel)
         left_layout.addWidget(style_box)
         left_layout.addWidget(self.bgm_panel)
+        clip_order_controls = QHBoxLayout()
+        clip_order_controls.addWidget(QLabel("클립 목록 · 위에서부터 재생"))
+        clip_order_controls.addStretch()
+        clip_order_controls.addWidget(self.move_up_btn)
+        clip_order_controls.addWidget(self.move_down_btn)
+        left_layout.addLayout(clip_order_controls)
         left_layout.addWidget(self.table, 1)
 
         # 처음엔 편집 영역과 미리보기를 반반으로 두고, 창을 키우면(최대화) 미리보기만 넓어진다.
@@ -198,6 +225,24 @@ class MainWindow(QMainWindow):
             restored = project_io.load(self.project_file)
             if restored is not None:
                 self._adopt_project(restored, restored=True)
+
+    def open_release(self,video_path=None) -> None:
+        if self._foreground_worker is not None or self._rendering():
+            return
+        if self._release_dialog is not None:
+            self._release_dialog.raise_()
+            return
+        path=video_path if video_path is not None else self.status_panel.result_path()
+        dialog=ReleaseDialog(self.settings,paths=self.ffpaths,video_path=path,suggested_title=self.project.title if self.project else "",parent=self)
+        self._release_dialog=dialog
+        try:
+            dialog.exec()
+        finally:
+            self._release_dialog=None
+            dialog.deleteLater()
+            if self._release_close_requested:
+                self._release_close_requested=False
+                QTimer.singleShot(0,self.close)
 
     # --- 설정 ---
     def _rebuild_tools(self) -> None:
@@ -339,7 +384,7 @@ class MainWindow(QMainWindow):
     # --- 미리보기 ---
     def start_previews(self, clips: list[Clip]) -> None:
         assert self.project is not None
-        w = Worker(pipeline.fetch_previews, self.project, self.settings, self.downloader, self._bridge.updated.emit, clips=clips)
+        w = Worker(pipeline.fetch_previews, self.project, self.settings, self.downloader, self._bridge.updated.emit, clips=list(clips))
         w.signals.finished.connect(self._on_previews_finished)
         w.signals.failed.connect(self._on_previews_failed)
         self._start(w)
@@ -375,6 +420,23 @@ class MainWindow(QMainWindow):
 
     def _on_row_selected(self, current, _previous) -> None:
         self.preview.set_clip(self.model.clip_at(current.row()) if current.isValid() else None)
+        self._update_clip_move_buttons()
+
+    def _update_clip_move_buttons(self) -> None:
+        row = self.table.currentIndex().row()
+        selected = self.table.isEnabled() and self.table.selectionModel().hasSelection()
+        self.move_up_btn.setEnabled(selected and 0 < row < self.model.rowCount())
+        self.move_down_btn.setEnabled(selected and 0 <= row < self.model.rowCount() - 1)
+
+    def _move_selected_clip(self, step: int) -> None:
+        if not self.table.isEnabled() or not self.table.selectionModel().hasSelection():
+            return
+        row = self.table.currentIndex().row()
+        target = row + step
+        if self.model.move_clip(row, target):
+            self.table.selectRow(target)
+            self.table.scrollTo(self.model.index(target, 0))
+            self._update_clip_move_buttons()
 
     def _on_clip_edited(self, clip: Clip) -> None:
         self.model.refresh_row(clip)
@@ -385,6 +447,9 @@ class MainWindow(QMainWindow):
         self._schedule_autosave()
 
     def _on_table_changed(self) -> None:
+        if self.project is not None:
+            self.project.clips[:] = self.model.clips
+        self._update_clip_move_buttons()
         self.status_panel.update_summary(self.project, self.settings)
         clip = self._selected_clip()
         if clip is not None and self.preview.clip is clip:
@@ -641,10 +706,12 @@ class MainWindow(QMainWindow):
         self.url_panel.set_busy(busy)
         self.status_panel.set_busy(busy)
         self.table.setEnabled(not busy)
+        self._update_clip_move_buttons()
         self.preview.setEnabled(not busy)
         self.preview.controls_panel.setEnabled(not busy and self.preview.mode() == "clip")
         self.settings_action.setEnabled(not busy)
         self.output_mode_combo.setEnabled(not busy)
+        self.release_action.setEnabled(not busy)
         self.bgm_panel.set_busy(busy)
 
     def cancel_work(self) -> None:
@@ -677,6 +744,12 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "StampCut", text)
 
     def closeEvent(self, event) -> None:
+        if self._release_dialog is not None and self._release_dialog.isVisible():
+            self._release_dialog.close()
+            if self._release_dialog.isVisible():
+                self._release_close_requested=not getattr(self._release_dialog,"close_declined",False)
+                event.ignore()
+                return
         active = [w for w in self._workers if not w.done]
         if active and QMessageBox.question(self, "StampCut", "작업이 진행 중입니다. 취소하고 종료할까요?") != QMessageBox.Yes:
             event.ignore()

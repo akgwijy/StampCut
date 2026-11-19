@@ -9,7 +9,7 @@ from stampcut.core.models import Clip, ClipStatus, Settings
 from stampcut.core.timestamps import format_time
 
 COL_ENABLED, COL_VIDEO, COL_TIME, COL_CAPTION, COL_PRE, COL_POST, COL_STATUS = range(7)
-HEADERS = ["✓", "영상", "시간", "자막", "앞", "뒤", "상태"]
+HEADERS = ["✓", "영상 제목", "시간", "자막", "앞", "뒤", "상태"]
 _STATUS_TEXT = {
     ClipStatus.PENDING: "대기",
     ClipStatus.DOWNLOADING: "받는 중",
@@ -37,6 +37,18 @@ class ClipTableModel(QAbstractTableModel):
         self.beginResetModel()
         self.clips = list(clips)
         self.endResetModel()
+
+    def move_clip(self, source: int, target: int) -> bool:
+        """Move one row without replacing clip objects or resetting selection."""
+        if source == target or not (0 <= source < len(self.clips) and 0 <= target < len(self.clips)):
+            return False
+        destination = target + 1 if target > source else target
+        if not self.beginMoveRows(QModelIndex(), source, source, QModelIndex(), destination):
+            return False
+        self.clips.insert(target, self.clips.pop(source))
+        self.endMoveRows()
+        self.changed.emit()
+        return True
 
     def set_settings(self, settings: Settings) -> None:
         self.settings = settings
@@ -85,7 +97,7 @@ class ClipTableModel(QAbstractTableModel):
             return Qt.Checked if clip.enabled else Qt.Unchecked
         if role in (Qt.DisplayRole, Qt.EditRole):
             if col == COL_VIDEO:
-                return clip.video.short_name
+                return clip.video.title
             if col == COL_TIME:
                 return format_time(clip.t)
             if col == COL_CAPTION:
@@ -104,6 +116,8 @@ class ClipTableModel(QAbstractTableModel):
             if col == COL_STATUS and clip.status is ClipStatus.ERROR:
                 return QColor("#d00000")
         if role == Qt.ToolTipRole:
+            if col == COL_VIDEO:
+                return clip.video.title
             if col == COL_PRE:
                 return '댓글 시각 기준 시작 위치: -5초 = 5초 전, 0초 = 댓글 시각, 5초 = 5초 후'
             if col == COL_STATUS and clip.error:

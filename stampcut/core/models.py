@@ -41,6 +41,7 @@ class Settings:
     output_mode: str = "shorts"
     style_mode: str = "shorts"
     mode_settings: dict = field(default_factory=dict)
+    publish_draft: dict = field(default_factory=dict)
 
 
 CAPTION_STYLE_FIELDS = ("caption_x", "caption_y", "caption_font_size", "caption_font_path", "caption_color")
