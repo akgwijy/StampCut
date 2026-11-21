@@ -93,8 +93,11 @@ def _preview_one(clip: Clip, s: Settings, downloader: Downloader, on_clip: Calla
     except DownloadCancelled:
         clip.status = ClipStatus.PENDING
     except DownloadFailed as e:
-        clip.status, clip.error = ClipStatus.ERROR, str(e)
-        log.warning("preview failed for %s@%s: %s", clip.video.video_id, clip.t, e)
+        if cancel is not None and cancel.is_set():
+            clip.status = ClipStatus.PENDING
+        else:
+            clip.status, clip.error = ClipStatus.ERROR, str(e)
+            log.warning("preview failed for %s@%s: %s", clip.video.video_id, clip.t, e)
     on_clip(clip)
 
 
@@ -117,6 +120,10 @@ def fetch_previews(
     with ThreadPoolExecutor(max_workers=max(1, s.parallel_downloads)) as ex:
         futures = [ex.submit(_preview_one, c, s, downloader, on_clip, cancel) for c in targets]
         for _ in as_completed(futures):
+            if cancel is not None and cancel.is_set():
+                for future in futures:
+                    future.cancel()
+                break
             done += 1
             progress("preview", done, n, f"미리보기용 구간 받는 중 {done} / {n}")
 

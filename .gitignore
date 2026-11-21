@@ -14,4 +14,6 @@ client_secret*.json
 client_secrets*.json
 oauth-client*.json
 publish-secrets.bin
+/docs/github-docs-recovery-key.txt
+/docs/google-oauth-client.json
 /docs/insta_token.txt

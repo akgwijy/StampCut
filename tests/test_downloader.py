@@ -1,7 +1,12 @@
+import sys
 import threading
 from pathlib import Path
 
 import pytest
+from yt_dlp.downloader import get_suitable_downloader
+from yt_dlp.downloader import external
+from yt_dlp.downloader.external import FFmpegFD
+from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
 from yt_dlp.utils import DownloadError
 
 from stampcut.core.downloader import (
@@ -86,6 +91,30 @@ def test_preview_download_sets_fields(tmp_path, make_video, make_clip):
     assert seen == [0.5]
 
 
+def test_partial_download_uses_configured_ffmpeg_outside_path(tmp_path, monkeypatch, make_video, make_clip):
+    ffmpeg = tmp_path / "tools" / "ffmpeg.exe"
+    ffmpeg.parent.mkdir()
+    ffmpeg.touch()
+    monkeypatch.setattr(FFmpegPostProcessor, "_version_cache", {None: None})
+    monkeypatch.setattr(FFmpegPostProcessor, "_features_cache", {})
+    monkeypatch.setattr(
+        "yt_dlp.postprocessor.ffmpeg._get_exe_version_output",
+        lambda executable, *_: "ffmpeg version 7.1\n" if Path(executable) == ffmpeg else None,
+    )
+
+    class PartialDownloadYdl(FakeYdl):
+        def download(self, urls):
+            info = {"url": "https://example.invalid/clip.mp4", "section_start": 1, "section_end": 2}
+            assert get_suitable_downloader(info, self.opts) is FFmpegFD
+            super().download(urls)
+
+    clip = make_clip(make_video(duration=1449), t=758)
+    out = Downloader(tmp_path / "cache", str(ffmpeg), PartialDownloadYdl).download_preview(clip, Settings())
+
+    assert out.is_file()
+    assert not FFmpegFD.available()
+
+
 def test_final_download_sets_fields(tmp_path, make_video, make_clip):
     clip = make_clip(make_video(duration=1449), t=758)
     out = Downloader(tmp_path, None, FakeYdl).download_final(clip, Settings())
@@ -121,6 +150,25 @@ def test_cancel_raises_and_removes_partial(tmp_path, make_video, make_clip):
     assert not (video_dir / "preview_728_818.mp4").exists()
     # Exactly one file should remain: the sibling file we created
     assert [p.name for p in video_dir.iterdir()] == ["preview_728_8180.mp4"]
+
+
+def test_cancel_interrupts_external_download_before_a_progress_hook(tmp_path, make_video, make_clip):
+    cancel = threading.Event()
+
+    class ExternalProcessYdl(FakeYdl):
+        def download(self, urls):
+            Path(self.opts["outtmpl"] + ".part").write_bytes(b"partial")
+            with external.Popen([sys.executable, "-c", "import time; time.sleep(2)"]) as process:
+                cancel.set()
+                try:
+                    process.wait()
+                finally:
+                    process.kill(timeout=None)
+
+    clip = make_clip(make_video(), 758)
+    with pytest.raises(DownloadCancelled):
+        Downloader(tmp_path, None, ExternalProcessYdl).download_preview(clip, Settings(), cancel=cancel)
+    assert not list(tmp_path.rglob("*.part"))
 
 
 def test_download_error_maps_to_download_failed(tmp_path, make_video, make_clip):

@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -42,6 +42,7 @@ from stampcut.gui.preview_widget import PreviewWidget, load_font_family
 from stampcut.gui.settings_dialog import SettingsDialog
 from stampcut.gui.status_bar import StatusPanel
 from stampcut.gui.release_dialog import ReleaseDialog
+from stampcut.gui.url_export_dialog import UrlExportDialog
 from stampcut.gui.url_panel import UrlPanel
 from stampcut.gui.period_video_dialog import PeriodVideoDialog
 from stampcut.gui.workers import Worker
@@ -87,12 +88,14 @@ class MainWindow(QMainWindow):
         self._adopting_project = False
         self._release_dialog = None
         self._release_close_requested = False
+        self._url_export_dialog: UrlExportDialog | None = None
         self.project_file = project_file
         self.project: Project | None = None
         self.pool = QThreadPool.globalInstance()
         self._workers: list[Worker] = []
         self._render_worker: Worker | None = None
         self._foreground_worker: Worker | None = None
+        self._preview_worker: Worker | None = None
         self._render_candidates: set[str] = set()
         self._bridge = _ClipBridge()
         self._bridge.updated.connect(self._on_clip_updated)
@@ -124,6 +127,7 @@ class MainWindow(QMainWindow):
 
         self.url_panel = UrlPanel()
         self.url_panel.analyze_requested.connect(self.start_analysis)
+        self.url_panel.export_requested.connect(self.open_url_export)
         self.url_panel.period_requested.connect(self.find_period_videos)
         self.url_panel.source_changed.connect(self._on_urls_changed)
         self.url_panel.title_edit.textChanged.connect(self._on_title_changed)
@@ -151,6 +155,12 @@ class MainWindow(QMainWindow):
         retry = QAction("미리보기 다시 받기", self.table)
         retry.triggered.connect(self._retry_preview)
         self.table.addAction(retry)
+        self.delete_clip_action = QAction("클립 삭제", self.table)
+        self.delete_clip_action.setEnabled(False)
+        self.delete_clip_action.setShortcut(QKeySequence("Delete"))
+        self.delete_clip_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self.delete_clip_action.triggered.connect(self._delete_selected_clip)
+        self.table.addAction(self.delete_clip_action)
         self.table.setContextMenuPolicy(Qt.ActionsContextMenu)
 
         self.move_up_btn = QPushButton("▲ 위로")
@@ -161,8 +171,12 @@ class MainWindow(QMainWindow):
         self.move_down_btn.setEnabled(False)
         self.move_up_btn.clicked.connect(lambda: self._move_selected_clip(-1))
         self.move_down_btn.clicked.connect(lambda: self._move_selected_clip(1))
-        self.table.selectionModel().selectionChanged.connect(self._update_clip_move_buttons)
-        self.model.modelReset.connect(self._update_clip_move_buttons)
+        self.preview_download_btn = QPushButton("다운로드 시작")
+        self.preview_download_btn.setToolTip("클립 미리보기 다운로드")
+        self.preview_download_btn.setEnabled(False)
+        self.preview_download_btn.clicked.connect(self._toggle_preview_download)
+        self.table.selectionModel().selectionChanged.connect(self._update_clip_actions)
+        self.model.modelReset.connect(self._update_clip_actions)
 
         self.preview = PreviewWidget(self.settings, load_font_family(settings_mod.resolve_font(self.settings)))
         self.preview.clip_changed.connect(self._on_clip_edited)
@@ -201,6 +215,7 @@ class MainWindow(QMainWindow):
         clip_order_controls = QHBoxLayout()
         clip_order_controls.addWidget(QLabel("클립 목록 · 위에서부터 재생"))
         clip_order_controls.addStretch()
+        clip_order_controls.addWidget(self.preview_download_btn)
         clip_order_controls.addWidget(self.move_up_btn)
         clip_order_controls.addWidget(self.move_down_btn)
         left_layout.addLayout(clip_order_controls)
@@ -273,6 +288,7 @@ class MainWindow(QMainWindow):
         self.status_panel.update_summary(self.project, s)
         self.bgm_panel.set_bgm_dir(s.bgm_dir)
         self._check_full_preview()
+        self._update_preview_download_button()
 
     def _on_output_mode_changed(self, _index: int) -> None:
         self._set_output_mode(self.output_mode_combo.currentData())
@@ -291,6 +307,7 @@ class MainWindow(QMainWindow):
         self.model.set_settings(self.settings)
         self.preview.set_settings(self.settings)
         self.status_panel.update_summary(self.project, self.settings)
+        self._update_preview_download_button()
         if persist:
             settings_mod.save(self.settings)
             self._schedule_autosave()
@@ -301,6 +318,22 @@ class MainWindow(QMainWindow):
         self._check_full_preview()
 
     # --- 분석 ---
+    def open_url_export(self) -> None:
+        if self._url_export_dialog is not None:
+            self._url_export_dialog.raise_()
+            return
+        if self.project and any(clip.mentions for clip in self.project.clips):
+            dialog = UrlExportDialog(self.project, self)
+            self._url_export_dialog = dialog
+            self.model.changed.connect(dialog.refresh)
+            dialog.clip_delete_requested.connect(self._delete_clip)
+            dialog.finished.connect(self._on_url_export_closed)
+            self._update_clip_actions()
+            dialog.open()
+
+    def _on_url_export_closed(self) -> None:
+        self._url_export_dialog = None
+
     def start_analysis(self) -> None:
         source = self.url_panel.source_panel
         if source.is_channel():
@@ -346,13 +379,20 @@ class MainWindow(QMainWindow):
             self._info("타임스탬프가 적힌 댓글이 없습니다.")
         elif self.ffpaths is None:
             self.status_panel.set_idle(FFMPEG_MISSING)
+        else:
+            self.status_panel.set_idle("댓글 분석 완료 · 미리보기는 다운로드 시작을 누르세요")
         if project.warnings:
             self._info("\n".join(project.warnings))
         self.analysis_done.emit()
 
     def _adopt_project(self, project: Project, restored: bool = False) -> None:
         """분석 결과 채택과 저장 파일 복원이 공유하는 공통 경로."""
+        if self._url_export_dialog is not None:
+            self._url_export_dialog.close()
+        if self._preview_worker is not None:
+            self._preview_worker.cancel.set()
         self.project = project
+        self.url_panel.set_export_available(any(clip.mentions for clip in project.clips))
         self._set_output_mode(project.output_mode, preserve_clips=False, persist=False)
         if restored:
             self._adopting_project = True
@@ -370,8 +410,6 @@ class MainWindow(QMainWindow):
         self.status_panel.update_summary(project, self.settings)
         if project.clips:
             self.table.selectRow(0)
-            if self.ffpaths is not None:
-                self.start_previews(project.clips)
         if restored:
             self.status_panel.set_idle(FFMPEG_MISSING if self.ffpaths is None else "이전 작업을 불러왔습니다 — 이어서 편집하세요")
         self._schedule_autosave()
@@ -382,22 +420,60 @@ class MainWindow(QMainWindow):
         self._warn(f"댓글 분석 실패:\n{msg}")
 
     # --- 미리보기 ---
+    def _has_missing_previews(self) -> bool:
+        return self.project is not None and any(not preview_covers(clip, self.settings) for clip in self.project.clips)
+
+    def _update_preview_download_button(self, busy: bool | None = None) -> None:
+        if busy is None:
+            busy = self._foreground_worker is not None
+        worker = self._preview_worker
+        if worker is not None:
+            stopping = worker.cancel.is_set()
+            self.preview_download_btn.setText("중지 중…" if stopping else "다운로드 중지")
+            self.preview_download_btn.setEnabled(not busy and not stopping)
+        else:
+            self.preview_download_btn.setText("다운로드 시작")
+            self.preview_download_btn.setEnabled(not busy and self.ffpaths is not None and self._has_missing_previews())
+
+    def _toggle_preview_download(self) -> None:
+        if self._preview_worker is not None:
+            self._preview_worker.cancel.set()
+            self._update_preview_download_button()
+            if not self.status_panel.has_result():
+                self.status_panel.message.setText("미리보기 다운로드 중지 중…")
+        elif self.project is not None and self.ffpaths is not None:
+            self.start_previews(self.project.clips)
+
     def start_previews(self, clips: list[Clip]) -> None:
-        assert self.project is not None
-        w = Worker(pipeline.fetch_previews, self.project, self.settings, self.downloader, self._bridge.updated.emit, clips=list(clips))
-        w.signals.finished.connect(self._on_previews_finished)
-        w.signals.failed.connect(self._on_previews_failed)
+        project = self.project
+        if project is None or not clips or self._preview_worker is not None or self._foreground_worker is not None:
+            return
+        w = Worker(pipeline.fetch_previews, project, self.settings, self.downloader, self._bridge.updated.emit, clips=list(clips))
+        w.signals.finished.connect(lambda _: self._on_previews_finished(project))
+        w.signals.failed.connect(lambda message: self._on_previews_finished(project, message))
+        w.signals.cancelled.connect(lambda: self._on_previews_finished(project))
+        self._preview_worker = w
+        self._update_preview_download_button()
+        self._update_clip_actions()
         self._start(w)
 
-    def _on_previews_finished(self, _result) -> None:
-        if self._foreground_worker is not None or self._rendering() or self.status_panel.has_result():
+    def _on_previews_finished(self, project: Project | None, error: str | None = None) -> None:
+        worker = self._preview_worker
+        if worker is None:
             return
-        self.status_panel.set_idle("미리보기 준비됨")
-
-    def _on_previews_failed(self, msg: str) -> None:
-        if self._foreground_worker is not None or self._rendering() or self.status_panel.has_result():
+        self._preview_worker = None
+        self._update_preview_download_button()
+        self._update_clip_actions()
+        if project is not self.project or self._foreground_worker is not None or self._rendering() or self.status_panel.has_result():
             return
-        self.status_panel.set_idle(f"미리보기 오류: {msg}")
+        if worker.cancel.is_set():
+            self.status_panel.set_idle("미리보기 다운로드 중지됨")
+        elif error is not None:
+            self.status_panel.set_idle(f"미리보기 오류: {error}")
+        elif self._has_missing_previews():
+            self.status_panel.set_idle("아직 준비되지 않은 미리보기가 있습니다")
+        else:
+            self.status_panel.set_idle("미리보기 준비됨")
 
     def _on_clip_updated(self, clip: Clip) -> None:
         self.model.refresh_row(clip)
@@ -407,7 +483,7 @@ class MainWindow(QMainWindow):
 
     def _retry_preview(self) -> None:
         clip = self._selected_clip()
-        if clip and self.project:
+        if clip and self.project and self.ffpaths is not None and self._preview_worker is None and self._foreground_worker is None:
             if clip.preview_path and clip.preview_path.exists():
                 clip.preview_path.unlink(missing_ok=True)  # 깨진 캐시 파일이면 다시 받도록 지운다
             clip.preview_path = None
@@ -420,13 +496,34 @@ class MainWindow(QMainWindow):
 
     def _on_row_selected(self, current, _previous) -> None:
         self.preview.set_clip(self.model.clip_at(current.row()) if current.isValid() else None)
-        self._update_clip_move_buttons()
+        self._update_clip_actions()
 
-    def _update_clip_move_buttons(self) -> None:
+    def _update_clip_actions(self) -> None:
         row = self.table.currentIndex().row()
         selected = self.table.isEnabled() and self.table.selectionModel().hasSelection()
         self.move_up_btn.setEnabled(selected and 0 < row < self.model.rowCount())
         self.move_down_btn.setEnabled(selected and 0 <= row < self.model.rowCount() - 1)
+        can_delete = self.table.isEnabled() and self._preview_worker is None
+        self.delete_clip_action.setEnabled(can_delete and selected and row >= 0)
+        if self._url_export_dialog is not None:
+            self._url_export_dialog.set_delete_allowed(can_delete)
+
+    def _delete_selected_clip(self) -> None:
+        if (clip := self._selected_clip()) is not None:
+            self._delete_clip(clip)
+
+    def _delete_clip(self, clip: Clip) -> None:
+        if self.project is None or not self.table.isEnabled() or self._preview_worker is not None:
+            return
+        row = self.model.row_of(clip)
+        if row < 0:
+            return
+        was_selected = self._selected_clip() is clip
+        self.model.remove_clip(row)
+        if was_selected and self.model.rowCount():
+            self.table.selectRow(min(row, self.model.rowCount() - 1))
+        elif not self.model.rowCount():
+            self.preview.set_clip(None)
 
     def _move_selected_clip(self, step: int) -> None:
         if not self.table.isEnabled() or not self.table.selectionModel().hasSelection():
@@ -436,24 +533,27 @@ class MainWindow(QMainWindow):
         if self.model.move_clip(row, target):
             self.table.selectRow(target)
             self.table.scrollTo(self.model.index(target, 0))
-            self._update_clip_move_buttons()
+            self._update_clip_actions()
 
     def _on_clip_edited(self, clip: Clip) -> None:
+        if clip.preview_path is not None and clip.status in (ClipStatus.READY, ClipStatus.PENDING):
+            clip.status = ClipStatus.READY if preview_covers(clip, self.settings) else ClipStatus.PENDING
         self.model.refresh_row(clip)
         self.status_panel.update_summary(self.project, self.settings)
-        if self.project and clip.status is ClipStatus.READY and not preview_covers(clip, self.settings):
-            self.start_previews([clip])
+        self._update_preview_download_button()
         self._check_full_preview()
         self._schedule_autosave()
 
     def _on_table_changed(self) -> None:
         if self.project is not None:
             self.project.clips[:] = self.model.clips
-        self._update_clip_move_buttons()
+            self.url_panel.set_export_available(any(clip.mentions for clip in self.project.clips))
+        self._update_clip_actions()
         self.status_panel.update_summary(self.project, self.settings)
         clip = self._selected_clip()
         if clip is not None and self.preview.clip is clip:
             self.preview.sync_from_clip()
+        self._update_preview_download_button()
         self._check_full_preview()
         self._schedule_autosave()
 
@@ -692,6 +792,8 @@ class MainWindow(QMainWindow):
 
     def _on_worker_progress(self, worker: Worker, stage: str, done: int, total: int, message: str) -> None:
         """주 작업의 진행률을 백그라운드 미리보기가 덮어쓰지 않도록 한다."""
+        if stage == "preview" and (worker.cancel.is_set() or self.status_panel.has_result()):
+            return
         if self._rendering() and worker is not self._render_worker:
             return
         if self._foreground_worker is not None and worker is not self._foreground_worker:
@@ -706,13 +808,14 @@ class MainWindow(QMainWindow):
         self.url_panel.set_busy(busy)
         self.status_panel.set_busy(busy)
         self.table.setEnabled(not busy)
-        self._update_clip_move_buttons()
+        self._update_clip_actions()
         self.preview.setEnabled(not busy)
         self.preview.controls_panel.setEnabled(not busy and self.preview.mode() == "clip")
         self.settings_action.setEnabled(not busy)
         self.output_mode_combo.setEnabled(not busy)
         self.release_action.setEnabled(not busy)
         self.bgm_panel.set_busy(busy)
+        self._update_preview_download_button(busy)
 
     def cancel_work(self) -> None:
         # A completed foreground job can still have its terminal GUI callback queued.

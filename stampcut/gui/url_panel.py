@@ -11,6 +11,7 @@ from stampcut.gui.source_panel import SourcePanel
 
 class UrlPanel(QWidget):
     analyze_requested = Signal()
+    export_requested = Signal()
     period_requested = Signal()
     source_changed = Signal()
 
@@ -26,6 +27,11 @@ class UrlPanel(QWidget):
         self.analyze_btn = QPushButton("댓글 분석")
         self.analyze_btn.setDefault(True)
         self.analyze_btn.clicked.connect(self.analyze_requested)
+        self.export_btn = QPushButton("URL추출")
+        self.export_btn.setToolTip("분석한 댓글의 시간으로 바로 이동하는 유튜브 링크 보기")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self.export_requested)
+        self._has_export_rows = False
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.source_panel)
@@ -34,6 +40,7 @@ class UrlPanel(QWidget):
         trow = QHBoxLayout()
         trow.addWidget(self.title_edit, 1)
         trow.addWidget(self.analyze_btn)
+        trow.addWidget(self.export_btn)
         layout.addLayout(trow)
         self.source_panel.changed.connect(self._sync_source)
         self.source_panel.find_requested.connect(self.period_requested)
@@ -101,8 +108,13 @@ class UrlPanel(QWidget):
     def set_title(self, title: str) -> None:
         self.title_edit.setText(title)
 
+    def set_export_available(self, available: bool) -> None:
+        self._has_export_rows = available
+        self.export_btn.setEnabled(available and self.analyze_btn.isEnabled())
+
     def set_busy(self, busy: bool) -> None:
         self.source_panel.set_busy(busy)
         self.title_edit.setReadOnly(busy)
         self.analyze_btn.setEnabled(not busy)
+        self.export_btn.setEnabled(not busy and self._has_export_rows)
         self.urls_edit.setReadOnly(busy)

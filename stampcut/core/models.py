@@ -104,6 +104,7 @@ class Mention:
     author: str
     like_count: int
     is_reply: bool
+    comment_text: str = ""
 
 
 class ClipStatus(str, Enum):

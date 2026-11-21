@@ -50,6 +50,12 @@ class ClipTableModel(QAbstractTableModel):
         self.changed.emit()
         return True
 
+    def remove_clip(self, row: int) -> None:
+        self.beginRemoveRows(QModelIndex(), row, row)
+        self.clips.pop(row)
+        self.endRemoveRows()
+        self.changed.emit()
+
     def set_settings(self, settings: Settings) -> None:
         self.settings = settings
         if self.clips:
