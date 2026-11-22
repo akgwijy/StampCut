@@ -123,7 +123,8 @@ def prepare_instagram(video:Path,paths,cache_key:str,progress=noop,cancel=None)-
     check_cancel(cancel)
     root=settings_mod.cache_dir()/"release"/cache_key
     root.mkdir(parents=True,exist_ok=True)
-    output=root/"instagram-v1.mp4"
+    # The previous cache format allowed MP4 edit lists, which Reels disallows.
+    output=root/"instagram-v2.mp4"
     source=inspect_video(video,paths)
     validate_media(source,"instagram")
     check_cancel(cancel)
@@ -140,7 +141,14 @@ def prepare_instagram(video:Path,paths,cache_key:str,progress=noop,cancel=None)-
     cmd=[str(paths.ffmpeg),"-hide_banner","-i",str(video)]
     if not source.has_audio:
         cmd += ["-f","lavfi","-i","anullsrc=r=48000:cl=stereo"]
-    cmd += ["-map","0:v:0","-map","0:a:0" if source.has_audio else "1:a:0","-map_metadata","-1","-vf","scale=1920:1920:force_original_aspect_ratio=decrease:force_divisible_by=2","-c:v","libx264","-preset","fast","-crf","20","-maxrate","25M","-bufsize","50M","-pix_fmt","yuv420p","-r","30","-x264-params","open-gop=0","-c:a","aac","-b:a","128k","-ar","48000","-ac","2","-t",str(source.duration),"-movflags","+faststart",str(temp)]
+    cmd += [
+        "-map", "0:v:0", "-map", "0:a:0" if source.has_audio else "1:a:0", "-map_metadata", "-1",
+        "-vf", "scale=1920:1920:force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-maxrate", "25M", "-bufsize", "50M",
+        "-pix_fmt", "yuv420p", "-r", "30", "-x264-params", "open-gop=0",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-t", str(source.duration),
+        "-movflags", "+faststart+negative_cts_offsets", "-use_editlist", "0", str(temp),
+    ]
     try:
         ffmpeg.run(cmd,on_progress=lambda fraction:progress("prepare",int(fraction*100),100,"인스타그램용 영상 준비 중"),cancel=cancel,total_seconds=source.duration)
         check_cancel(cancel)

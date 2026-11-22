@@ -109,9 +109,11 @@ def test_v1_file_loads_with_default_audio(tmp_path, make_video, make_clip):
     data = json.loads(pf.read_text("utf-8"))
     data["version"] = 1
     del data["audio"]
+    del data["comment_filter"]
     pf.write_text(json.dumps(data), "utf-8")
     loaded = project_io.load(pf)
     assert loaded is not None and loaded.audio == AudioMix() and len(loaded.clips) == 1
+    assert loaded.comment_filter == ""
 
 
 def test_broken_audio_falls_back_to_default(tmp_path, make_video, make_clip):

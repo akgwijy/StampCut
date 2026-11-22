@@ -10,6 +10,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QFrame,
     QLabel,
     QGroupBox,
     QHBoxLayout,
@@ -17,7 +18,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
+    QStyle,
     QTableView,
     QToolBar,
     QVBoxLayout,
@@ -59,11 +62,11 @@ class _ClipBridge(QObject):
     updated = Signal(object)
 
 
-def _analyze_job(urls, title, settings, client, progress, cancel, source=None):
+def _analyze_job(urls, title, settings, client, progress, cancel, source=None, *, comment_filter=""):
     try:
         if hasattr(client, "cancel_event"):
             client.cancel_event = cancel
-        project = pipeline.analyze(urls, title, settings, client, progress=progress, cancel=cancel)
+        project = pipeline.analyze(urls, title, settings, client, progress=progress, cancel=cancel, comment_filter=comment_filter)
         project.output_mode = settings.output_mode
         if source:
             for name in ("source_kind", "source_channel", "source_start", "source_end"):
@@ -108,7 +111,8 @@ class MainWindow(QMainWindow):
         self._rebuild_tools()
 
         self.setWindowTitle(f"StampCut {__version__}")
-        self.resize(1280, 900)
+        title_height = self.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight, None, self)
+        self.resize(1280, min(900, self.screen().availableGeometry().height() - title_height))
         toolbar = QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
@@ -206,14 +210,22 @@ class MainWindow(QMainWindow):
         elif not self.settings.api_key:
             self.status_panel.set_idle("⚙ 설정에서 YouTube API 키를 먼저 입력하세요")
 
-        left = QWidget()
-        left.setMinimumWidth(420)
-        left_layout = QVBoxLayout(left)
-        left_layout.addWidget(self.url_panel)
+        editor = QWidget()
+        editor_layout = QVBoxLayout(editor)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.addWidget(self.url_panel)
         style_box = QGroupBox("세부 설정")
         QVBoxLayout(style_box).addWidget(self.preview.controls_panel)
-        left_layout.addWidget(style_box)
-        left_layout.addWidget(self.bgm_panel)
+        editor_layout.addWidget(style_box)
+        editor_layout.addWidget(self.bgm_panel)
+        editor_scroll = QScrollArea()
+        editor_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setWidget(editor)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.addWidget(editor_scroll, 3)
         clip_order_controls = QHBoxLayout()
         clip_order_controls.addWidget(QLabel("클립 목록 · 위에서부터 재생"))
         clip_order_controls.addStretch()
@@ -222,9 +234,10 @@ class MainWindow(QMainWindow):
         clip_order_controls.addWidget(self.move_down_btn)
         left_layout.addLayout(clip_order_controls)
         left_layout.addWidget(self.table, 1)
+        left.setMinimumWidth(max(420, left.minimumSizeHint().width()))
 
         # 처음엔 편집 영역과 미리보기를 반반으로 두고, 창을 키우면(최대화) 미리보기만 넓어진다.
-        # 최소 폭(왼쪽 420 / 미리보기 430)은 버튼 행이 깨지지 않는 하한이다. 경계선은 드래그로 조절 가능.
+        # 왼쪽은 스크롤 영역 아래에 클립 목록을 고정한다. 경계선은 드래그로 조절 가능.
         self.preview.setMinimumWidth(430)
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(left)
@@ -367,7 +380,10 @@ class MainWindow(QMainWindow):
             return
         self._set_busy(True)
         self.status_panel.set_idle("댓글 분석 중")
-        w = Worker(_analyze_job, urls, self.url_panel.title(), self.settings, YouTubeClient(self.settings.api_key), source=source.metadata())
+        w = Worker(
+            _analyze_job, urls, self.url_panel.title(), self.settings, YouTubeClient(self.settings.api_key),
+            source=source.metadata(), comment_filter=self.url_panel.comment_filter(),
+        )
         w.signals.finished.connect(self._on_analyzed)
         w.signals.failed.connect(self._on_analyze_failed)
         w.signals.cancelled.connect(self._on_analysis_cancelled)
@@ -385,8 +401,9 @@ class MainWindow(QMainWindow):
         self._adopt_project(project)
         self._set_busy(False)
         if not project.clips:
-            self.status_panel.set_idle("타임스탬프가 적힌 댓글이 없습니다")
-            self._info("타임스탬프가 적힌 댓글이 없습니다.")
+            message = "필터와 일치하는 타임스탬프 댓글이 없습니다" if project.comment_filter else "타임스탬프가 적힌 댓글이 없습니다"
+            self.status_panel.set_idle(message)
+            self._info(f"{message}.")
         elif problem := self._ffmpeg_problem():
             self.status_panel.set_idle(problem)
         else:

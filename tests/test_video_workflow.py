@@ -90,6 +90,43 @@ def test_channel_lookup_confirmation_and_all_comment_analysis(qtbot,monkeypatch,
     assert widget.project.source_kind=="channel" and widget.project.source_end=="2026-11-15"
 
 
+@pytest.mark.parametrize("source_kind", ["urls", "channel"])
+def test_comment_filter_applies_to_analysis_and_reopens_with_project(qtbot, monkeypatch, tmp_path, make_video, source_kind):
+    video = make_video()
+
+    class Client:
+        def fetch_video_infos(self, urls, strict=False):
+            assert urls == [video.url]
+            return [video]
+
+        def fetch_all_comments(self, video_id):
+            return [
+                RawComment("match", "1:00 오늘 원더골", "@a", 0, False),
+                RawComment("other", "3:00 선방", "@b", 0, False),
+            ]
+
+    monkeypatch.setattr(main_window, "YouTubeClient", lambda key: Client())
+    path = tmp_path / "project.json"
+    widget = window(qtbot, monkeypatch, project_file=path)
+    monkeypatch.setattr(widget.pool, "start", lambda worker: worker.run())
+    if source_kind == "channel":
+        source = widget.url_panel.source_panel
+        source.source_combo.setCurrentIndex(1)
+        source.channel_edit.setText("@demo")
+        source.set_videos([video], "demo")
+    else:
+        widget.url_panel.urls_edit.setPlainText(video.url)
+
+    widget.url_panel.comment_filter_edit.setText("원더골")
+    widget.url_panel.analyze_btn.click()
+    assert [clip.t for clip in widget.project.clips] == [60]
+    widget.close()
+
+    reopened = window(qtbot, monkeypatch, project_file=path)
+    assert reopened.url_panel.comment_filter_edit.text() == "원더골"
+    assert [clip.t for clip in reopened.project.clips] == [60]
+
+
 def test_query_requires_new_confirmation_after_dates_change(qtbot,monkeypatch,make_video):
     widget=window(qtbot,monkeypatch)
     errors=[]

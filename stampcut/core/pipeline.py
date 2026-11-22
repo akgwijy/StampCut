@@ -50,8 +50,12 @@ def analyze(
     client: YouTubeClient,
     progress: ProgressFn = _noop,
     cancel: threading.Event | None = None,
+    *,
+    comment_filter: str = "",
 ) -> Project:
     s = normalize_output_settings(s)
+    comment_filter = comment_filter.strip()
+    query = comment_filter.casefold()
     total = len(urls) + 1
     progress("analyze", 0, total, "영상 정보 가져오는 중")
     _check(cancel)
@@ -66,6 +70,8 @@ def analyze(
         comments = client.fetch_all_comments(v.video_id)
         _check(cancel)
         for c in comments:
+            if query and query not in c.text.casefold():
+                continue
             mentions.extend(extract_mentions(v, c))
     _check(cancel)
     clips = build_clips(mentions, videos, s)
@@ -79,6 +85,7 @@ def analyze(
         clips=clips,
         warnings=[f"영상을 찾을 수 없어 건너뜀: {u}" for u in missing],
         output_mode=s.output_mode,
+        comment_filter=comment_filter,
     )
 
 

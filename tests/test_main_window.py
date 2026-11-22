@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices, QGuiApplication
-from PySide6.QtWidgets import QDialog, QPushButton, QTableWidget
+from PySide6.QtWidgets import QDialog, QPushButton, QScrollArea, QTableWidget
 
 from stampcut.core import project_io
 from stampcut.core.highlights import build_clips
@@ -30,7 +30,7 @@ def test_analyze_fills_table_and_preview(qtbot, monkeypatch, make_video, make_cl
     v = make_video()
     clip = make_clip(v, 758, caption="원더골")
     project = Project([v.url], "26.08.20 문성FC 하이라이트", [v], [clip])
-    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda *a, **k: project)
     monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: None)
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
@@ -280,7 +280,7 @@ def test_missing_ffmpeg_hints_and_skips_previews(qtbot, monkeypatch, make_video,
     fetched = []
     monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: fetched.append(1))
     project, _ = _project_with_clip(make_video, make_clip)
-    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda *a, **k: project)
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
     assert "ffmpeg" in w.status_panel.message.text()
@@ -304,7 +304,7 @@ def test_ffmpeg_without_drawtext_warns_but_still_downloads_previews(qtbot, monke
     fetched = []
     monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: fetched.append(1))
     project, _ = _project_with_clip(make_video, make_clip)
-    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda *a, **k: project)
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
     monkeypatch.setattr(w, "open_settings", lambda: None)
@@ -330,7 +330,7 @@ def test_analyze_reports_skipped_videos(qtbot, monkeypatch, make_video, make_cli
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: infos.append(a[2]))
     project, _ = _project_with_clip(make_video, make_clip)
     project.warnings = ["영상을 찾을 수 없어 건너뜀: https://youtu.be/BBBBBBBBBBB"]
-    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda *a, **k: project)
     monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: None)
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
@@ -366,9 +366,9 @@ def test_left_column_layout_and_full_width_table(qtbot):
 
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
-    left = w.url_panel.parentWidget()
-    assert w.table.parentWidget() is left  # URL과 표가 같은 왼쪽 열에
-    assert left.minimumWidth() == 420
+    left = w.splitter.widget(0)
+    assert left.isAncestorOf(w.url_panel) and w.table.parentWidget() is left
+    assert left.minimumWidth() >= 420
     assert w.preview.controls_panel.window() is w  # 세부 설정이 메인 창 안에 배치됨
     assert w.preview.parentWidget() is not left  # 미리보기는 오른쪽
     header = w.table.horizontalHeader()
@@ -386,6 +386,37 @@ def test_left_column_layout_and_full_width_table(qtbot):
         else:
             assert header.sectionResizeMode(col) == QHeaderView.ResizeToContents
     assert w.table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+
+
+def test_short_window_shows_clip_list_and_scrolls_to_bgm_controls(qtbot):
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.resize(1280, 650)
+    w.show()
+    qtbot.waitExposed(w)
+
+    assert w.height() == 650
+    for widget in (w.table, w.preview_download_btn, w.status_panel.render_btn):
+        assert w.rect().contains(widget.mapTo(w, widget.rect().bottomRight()))
+    editor = w.findChild(QScrollArea)
+    assert editor is not None
+    scrollbar = editor.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    scrollbar.setValue(scrollbar.maximum())
+    listen = w.bgm_panel.listen_btn
+    assert editor.viewport().rect().contains(listen.mapTo(editor.viewport(), listen.rect().bottomRight()))
+
+
+def test_fullscreen_does_not_compress_style_controls(qtbot):
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.waitExposed(w)
+    w.showFullScreen()
+    qtbot.waitUntil(lambda: w.isFullScreen() and w.height() >= w.screen().availableGeometry().height())
+
+    for widget in (w.preview.pre_spin, w.preview.title_x_spin, w.preview.title_font_picker.combo, w.preview.reset_btn):
+        assert widget.height() >= widget.minimumSizeHint().height()
 
 
 def test_busy_locks_detached_controls_panel(qtbot):
@@ -753,10 +784,10 @@ def test_video_and_settings_split_half_and_half(qtbot):
     w.show()
     qtbot.waitExposed(w)
     left, preview = w.splitter.widget(0), w.splitter.widget(1)
-    assert left is w.url_panel.parentWidget() and preview is w.preview
+    assert left.isAncestorOf(w.url_panel) and preview is w.preview
     a, b = w.splitter.sizes()
     assert abs(a - b) <= 40  # 처음엔 편집 영역과 미리보기가 (레이아웃 여백 오차 안에서) 반반
-    assert left.minimumWidth() == 420 and preview.minimumWidth() == 430  # 줄여도 버튼 행이 깨지지 않는 최소 폭
+    assert left.minimumWidth() >= 420 and preview.minimumWidth() == 430
     w.resize(w.width() + 400, w.height())  # 최대화처럼 창이 넓어지면
     qtbot.waitUntil(lambda: w.splitter.sizes()[1] > b, timeout=2000)
     a2, b2 = w.splitter.sizes()

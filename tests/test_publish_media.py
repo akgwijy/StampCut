@@ -146,7 +146,7 @@ def configure_preparation(monkeypatch, tmp_path, source_info=GOOD, cached_info=N
     def inspect(path, paths):
         if path.name == "original.mp4":
             return source_info
-        if path.name == "instagram-v1.mp4":
+        if path.name == "instagram-v2.mp4":
             if isinstance(cached_info, Exception):
                 raise cached_info
             return cached_info or GOOD
@@ -160,7 +160,7 @@ def configure_preparation(monkeypatch, tmp_path, source_info=GOOD, cached_info=N
 
 
 def cached_output(tmp_path):
-    output = tmp_path / "cache" / "release" / "source-sha" / "instagram-v1.mp4"
+    output = tmp_path / "cache" / "release" / "source-sha" / "instagram-v2.mp4"
     output.parent.mkdir(parents=True)
     output.write_bytes(b"cached-output")
     return output
@@ -173,6 +173,18 @@ def test_compatible_cached_file_is_reused_without_touching_source(monkeypatch, t
     result = media.prepare_instagram(source, PATHS, "source-sha")
     assert result == output and output.read_bytes() == b"cached-output" and runs == []
     assert source.read_bytes() == original
+
+
+def test_legacy_cache_is_not_used_for_instagram_retries(monkeypatch, tmp_path, source):
+    runs = configure_preparation(monkeypatch, tmp_path)
+    legacy = tmp_path / "cache" / "release" / "source-sha" / "instagram-v1.mp4"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"old-container")
+
+    output = media.prepare_instagram(source, PATHS, "source-sha")
+
+    assert output != legacy and output.read_bytes() == b"prepared-output"
+    assert legacy.read_bytes() == b"old-container" and len(runs) == 1
 
 
 @pytest.mark.parametrize("cached", [PublishError("corrupt cache"), replace(GOOD, video_codec="vp9"),
@@ -196,7 +208,8 @@ def test_conversion_sets_required_codecs_and_does_not_modify_source(monkeypatch,
     assert command[command.index("-c:v") + 1] == "libx264"
     assert command[command.index("-c:a") + 1] == "aac"
     assert command[command.index("-b:a") + 1] == "128k"
-    assert command[command.index("-movflags") + 1] == "+faststart"
+    assert "faststart" in command[command.index("-movflags") + 1].split("+")
+    assert command[command.index("-use_editlist") + 1] == "0"
     assert output != source and source.read_bytes() == before
 
 
@@ -272,6 +285,12 @@ def test_local_preparation_transcodes_192k_audio_and_verifies_faststart(local_ff
     assert info.size <= 300_000_000 and output != source
     binary = output.read_bytes()
     assert 0 <= binary.find(b"moov") < binary.find(b"mdat")
+    trace = subprocess.run(
+        [str(local_ffmpeg.ffprobe), "-v", "trace", "-show_entries", "format=format_name", str(output)],
+        check=True, capture_output=True, timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert b"type:'moov'" in trace.stderr and b"type:'elst'" not in trace.stderr
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
     previous_mtime = output.stat().st_mtime_ns
     assert media.prepare_instagram(source, local_ffmpeg, before) == output
@@ -304,3 +323,15 @@ def test_nominal_128k_encoder_output_can_be_used_as_public_url_input():
     # The local FFmpeg integration measured128098bps for an explicit128k target.
     info=media.MediaInfo(1080,1920,3.2,64349,True,audio_bitrate=128098)
     media.validate_media(info,"instagram","url")
+
+
+def test_instagram_file_preparation_keeps_shorts_resolution_and_duration(local_ffmpeg, tmp_path):
+    source = tmp_path / "highlight.mp4"
+    synthetic_video(local_ffmpeg, source, size="1080x1920")
+    fingerprint = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    output = media.prepare_instagram(source, local_ffmpeg, fingerprint)
+    info = media.inspect_video(output, local_ffmpeg)
+
+    assert (info.width, info.height) == (1080, 1920)
+    assert info.duration == pytest.approx(3.2, abs=0.05)

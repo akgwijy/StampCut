@@ -134,6 +134,12 @@ class ReleaseService:
                             upload = instagram_file if platform == "instagram" and url_mode else video
                             if platform == "instagram" and not url_mode:
                                 upload = self.preparer(video, self.paths, fingerprint, progress=target_progress, cancel=cancel)
+                                if not _ambiguous(state):
+                                    upload_fingerprint = file_fingerprint(upload, cancel)
+                                    if state.get("container_id") and state.get("upload_fingerprint") != upload_fingerprint:
+                                        for field in ("container_id", "upload_uri", "uploaded", "video_url"):
+                                            state.pop(field, None)
+                                    state["upload_fingerprint"] = upload_fingerprint
                             check_cancel(cancel)
                             post = self._provider(platform)(upload, draft, self.store, state, save_state, progress=target_progress, cancel=cancel)
                             state.update(status="success", id=post.id, url=post.url)

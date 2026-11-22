@@ -179,6 +179,7 @@ class Project:
     source_channel: str = ""
     source_start: str = ""
     source_end: str = ""
+    comment_filter: str = ""
 
     def enabled_clips(self) -> list[Clip]:
         return [c for c in self.clips if c.enabled]

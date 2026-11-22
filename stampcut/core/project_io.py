@@ -73,6 +73,7 @@ def save(project: Project, path: Path) -> None:
         "source_channel": project.source_channel,
         "source_start": project.source_start,
         "source_end": project.source_end,
+        "comment_filter": project.comment_filter,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -144,6 +145,7 @@ def load(path: Path) -> Project | None:
             source_kind="channel" if data.get("source_kind") == "channel" else "urls",
             source_channel=str(data.get("source_channel") or ""),
             source_start=str(data.get("source_start") or ""), source_end=str(data.get("source_end") or ""),
+            comment_filter=str(data.get("comment_filter") or ""),
         )
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None

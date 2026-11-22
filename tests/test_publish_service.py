@@ -37,6 +37,52 @@ def test_partial_success_retry_does_not_duplicate_completed_target(tmp_path):
     assert b"YT-TEST" not in store.path.read_bytes()
 
 
+@pytest.mark.parametrize("retry_case", ["legacy", "changed", "same", "uncertain"])
+def test_instagram_retry_reconciles_prepared_file_without_repeating_youtube(tmp_path, retry_case):
+    uploads = []
+    instagram_states = []
+
+    def youtube(*args, **kwargs):
+        uploads.append("youtube")
+        return PublishedPost("youtube", "abcdEFGH123", "https://www.youtube.com/watch?v=abcdEFGH123")
+
+    def instagram(video, draft, store, state, save_state, **kwargs):
+        uploads.append(video.read_bytes())
+        instagram_states.append(dict(state))
+        if len(instagram_states) == 1:
+            state.update(container_id="200", upload_uri="stored-uri", uploaded=False)
+            if retry_case == "legacy":
+                state.pop("upload_fingerprint", None)
+            if retry_case == "uncertain":
+                state["publish_attempted"] = True
+            save_state(state)
+            raise PublishError("file transfer failed")
+        if state.get("publish_attempted"):
+            raise PublishUncertain("check Instagram")
+        return PublishedPost("instagram", "300", "https://www.instagram.com/reel/test/")
+
+    service, video, _ = setup(tmp_path, {"youtube": youtube, "instagram": instagram})
+    old = tmp_path / "old.mp4"
+    old.write_bytes(b"old")
+    new = tmp_path / "new.mp4"
+    new.write_bytes(b"new")
+    service.preparer = lambda *args, **kwargs: old
+    draft = ReleaseDraft(title="title")
+    first = service.publish(video, draft)
+    assert first.outcomes[0].status == "success"
+    service.preparer = lambda *args, **kwargs: old if retry_case == "same" else new
+
+    retry = service.publish(video, draft)
+
+    assert retry.outcomes[0].post.already_uploaded
+    assert uploads == ["youtube", b"old", b"old" if retry_case == "same" else b"new"]
+    if retry_case in ("legacy", "changed"):
+        assert not {"container_id", "upload_uri", "uploaded"} & instagram_states[1].keys()
+    else:
+        assert instagram_states[1]["container_id"] == "200"
+    assert retry.outcomes[1].status == ("uncertain" if retry_case == "uncertain" else "success")
+
+
 def test_missing_selected_account_is_checked_before_any_upload(tmp_path):
     calls=[]
     service,video,store=setup(tmp_path,{"youtube":lambda *a,**k:calls.append(1)})

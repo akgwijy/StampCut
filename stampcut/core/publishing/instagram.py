@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import re
 import time
 from contextlib import nullcontext
@@ -18,6 +19,7 @@ import requests
 
 from .models import PublishedPost, PublishError, PublishUncertain, check_cancel, noop
 
+log = logging.getLogger(__name__)
 REQUEST_TIMEOUT = (10, 60)
 POLL_INTERVAL = 60
 POLL_ATTEMPTS = 5
@@ -50,6 +52,7 @@ def _configuration(account_id, access_token, method, api_version, *, discover=Fa
 def _request(session, method, url, token, *, stage="계정 확인", headers=None, **kwargs):
     auth = {"Authorization": f"Bearer {token}"}
     auth.update(headers or {})
+    started = time.monotonic()
     try:
         response = session.request(method, url, headers=auth, timeout=REQUEST_TIMEOUT,
                                    allow_redirects=False, **kwargs)
@@ -73,7 +76,9 @@ def _request(session, method, url, token, *, stage="계정 확인", headers=None
         if isinstance(nested, dict):
             error = nested.get("error")
     code = error.get("code") if isinstance(error, dict) else None
+    processing_failed = debug.get("type") == "ProcessingFailedError"
     if not 200 <= response.status_code < 300 or error or (debug and payload.get("success") is not True):
+        raw_message = error.get("message") if isinstance(error, dict) else debug.get("message")
         if code in (102, 190) or response.status_code == 401:
             message = "인스타그램 액세스 토큰이 만료되었거나 유효하지 않습니다. 계정 설정에서 새 장기 토큰으로 다시 연결하세요."
         elif code in (10, 200, 294) or response.status_code == 403:
@@ -82,17 +87,22 @@ def _request(session, method, url, token, *, stage="계정 확인", headers=None
             message = "인스타그램 API 사용 제한에 도달했습니다. 잠시 기다린 뒤 다시 시도하세요."
         elif response.status_code >= 500:
             message = "인스타그램 서버 오류입니다. 잠시 후 다시 시도하세요."
-        elif isinstance(error, dict) and error.get("message") == "unauthorized user request":
+        elif isinstance(raw_message, str) and raw_message.strip().casefold() == "unauthorized user request":
             message = "Meta가 이 요청에 필요한 권한을 승인하지 않았습니다."
+        elif processing_failed:
+            message = "Meta가 전송 영상을 처리하지 못했습니다."
         else:
             message = "Meta가 요청을 거절했거나 예상과 다른 응답을 반환했습니다."
         details = [f"HTTP {response.status_code}"]
         if type(code) is int:
             subcode = error.get("error_subcode")
             details.append(f"Meta {code}/{subcode}" if type(subcode) is int else f"Meta {code}")
-        if debug.get("type") == "ProcessingFailedError":
+        if processing_failed:
             details.append("ProcessingFailedError")
         message = f"{stage} ({', '.join(details)}) · {message}"
+        retriable = debug.get("retriable")
+        log.warning("%s [elapsed=%.1fs, retriable=%s]", message, time.monotonic() - started,
+                    retriable if isinstance(retriable, bool) else "unknown")
         definitive = (400 <= response.status_code < 500
                       and (code in (102, 190, 10, 200, 294, 4, 17, 32, 341, 613)
                            or response.status_code in (401, 403, 429)))
@@ -234,14 +244,18 @@ def _status(client, base, container, token, cancel):
     return status
 
 
+def _discard_container(state, save_state):
+    for key in ("container_id", "upload_uri", "uploaded", "video_url"):
+        state.pop(key, None)
+    state["status"] = "failed"
+    save_state(state)
+
+
 def _processing_failure(status, state, save_state):
     if status in ("ERROR", "EXPIRED"):
         # Neither terminal state can be published. Allow a later explicit retry
         # to create a fresh container, provided no publication was attempted.
-        for key in ("container_id", "upload_uri", "uploaded"):
-            state.pop(key, None)
-        state["status"] = "failed"
-        save_state(state)
+        _discard_container(state, save_state)
         if status == "EXPIRED":
             raise PublishError("인스타그램 업로드 세션이 만료되었습니다. 다시 업로드하세요.")
         raise PublishError("인스타그램 영상 처리에 실패했습니다. 영상 형식과 계정 게시 권한을 확인한 뒤 다시 시도하세요.")
@@ -267,7 +281,8 @@ def publish_instagram(video: Path, draft, store, state, save_state,
     uncertain=state.get("publish_attempted") or state.get("status") in ("uncertain","unknown")
     if uncertain and not _identifier(state.get("container_id")):
         raise PublishUncertain(_UNKNOWN)
-    public_url = _public_video_url(draft.instagram_video_url) if method == "url" else None
+    url_mode = method == "url"
+    public_url = _public_video_url(draft.instagram_video_url) if url_mode else None
     progress("instagram", 0, 100, "인스타그램 업로드 준비 중")
     with requests.Session() if session is None else nullcontext(session) as client:
         container = state.get("container_id")
@@ -288,25 +303,26 @@ def publish_instagram(video: Path, draft, store, state, save_state,
         else:
             check_cancel(cancel)
             data = {"media_type": "REELS", "caption": draft.body}
-            data.update({"upload_type": "resumable"} if method != "url" else {"video_url": public_url})
+            data.update({"video_url": public_url} if url_mode else {"upload_type": "resumable"})
             created = _request(client, "POST", f"{base}/{account}/media", token, stage="업로드 세션 생성", data=data)
             container = created.get("id")
             if not _identifier(container):
                 raise PublishError("인스타그램 업로드 세션 응답을 읽을 수 없습니다.")
-            upload_uri = _upload_uri(created.get("uri"), version, container) if method != "url" else None
-            state.update(account_id=account, container_id=container, uploaded=method == "url", status="uploading")
+            upload_uri = None if url_mode else _upload_uri(created.get("uri"), version, container)
+            state.update(account_id=account, container_id=container, uploaded=url_mode, status="uploading")
             if public_url:
                 state["video_url"] = public_url
             if upload_uri:
                 state["upload_uri"] = upload_uri
             save_state(state)
-        if method != "url" and not state.get("uploaded") and status != "FINISHED":
+        if not url_mode and not state.get("uploaded") and status != "FINISHED":
             uri = _upload_uri(state.get("upload_uri"), version, container)
             check_cancel(cancel)
             try:
                 size = Path(video).stat().st_size
                 if not 0 < size <= 300_000_000:
                     raise PublishError("인스타그램 영상은 0바이트보다 크고 300MB 이하여야 합니다.")
+                log.info("Instagram file transfer: %d bytes", size)
                 with Path(video).open("rb") as file:
                     response = _request(client, "POST", uri, token, stage="파일 전송",
                                         headers={"Authorization": f"OAuth {token}", "offset": "0", "file_size": str(size)},
