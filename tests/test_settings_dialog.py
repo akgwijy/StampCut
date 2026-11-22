@@ -37,15 +37,44 @@ def test_ytdlp_version_is_string():
 
 
 def test_ffmpeg_status_checks_app_dir(qtbot, tmp_path, monkeypatch):
+    from stampcut.core.ffmpeg import exe_name
     from stampcut.gui import settings_dialog as sd
 
     (tmp_path / "bin").mkdir()
-    (tmp_path / "bin" / "ffmpeg.exe").write_bytes(b"")
-    (tmp_path / "bin" / "ffprobe.exe").write_bytes(b"")
+    ffmpeg = tmp_path / "bin" / exe_name("ffmpeg")  # 실행 중인 OS 기준 이름 (Windows만 .exe)
+    ffmpeg.write_bytes(b"")
+    (tmp_path / "bin" / exe_name("ffprobe")).write_bytes(b"")
     monkeypatch.setattr(sd.settings_mod, "app_dir", lambda: tmp_path)
     d = sd.SettingsDialog(Settings(ffmpeg_path=""))
     qtbot.addWidget(d)
-    assert "감지됨" in d.ffmpeg_status.text() and str(tmp_path / "bin" / "ffmpeg.exe") in d.ffmpeg_status.text()
+    assert "감지됨" in d.ffmpeg_status.text() and str(ffmpeg) in d.ffmpeg_status.text()
+
+
+def test_ffmpeg_status_hint_follows_platform(qtbot, monkeypatch):
+    from stampcut.gui import settings_dialog as sd
+
+    monkeypatch.setattr(sd, "find_ffmpeg", lambda *a: None)
+    monkeypatch.setattr("sys.platform", "darwin")
+    d = sd.SettingsDialog(Settings(ffmpeg_path=""))
+    qtbot.addWidget(d)
+    assert "brew install ffmpeg-full" in d.ffmpeg_status.text() and "winget" not in d.ffmpeg_status.text()
+    assert "bin/ffmpeg " in d.ffmpeg_path.placeholderText() and "기본 설치 폴더" in d.ffmpeg_path.placeholderText()
+
+
+def test_ffmpeg_status_warns_when_drawtext_missing(qtbot, monkeypatch):
+    from pathlib import Path
+
+    from stampcut.core.ffmpeg import FfmpegPaths
+    from stampcut.gui import settings_dialog as sd
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(sd, "find_ffmpeg", lambda *a: FfmpegPaths(Path("/opt/homebrew/bin/ffmpeg"), Path("/opt/homebrew/bin/ffprobe")))
+    monkeypatch.setattr(sd, "missing_filters", lambda p: ("drawtext",))
+    d = sd.SettingsDialog(Settings(ffmpeg_path=""))
+    qtbot.addWidget(d)
+    text = d.ffmpeg_status.text()
+    assert "감지됨" in text and "/opt/homebrew/bin/ffmpeg" in text and "drawtext" in text and "brew install ffmpeg-full" in text
+    assert "#c06000" in d.ffmpeg_status.styleSheet()  # 빨강(없음)도 초록(정상)도 아닌 경고색
 
 
 def test_cache_button_disabled_while_busy(qtbot):

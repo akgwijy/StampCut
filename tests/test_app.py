@@ -23,6 +23,7 @@ def _restore_root_logging():
 
 
 def test_setup_logging_creates_rotating_handler(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     root = logging.getLogger()
     app.setup_logging()

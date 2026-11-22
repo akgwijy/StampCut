@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from stampcut.core import settings as settings_mod
-from stampcut.core.ffmpeg import find_ffmpeg
+from stampcut.core.ffmpeg import exe_name, fallback_dirs, find_ffmpeg, install_hint, missing_filters
 from stampcut.core.models import Settings
 
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -67,7 +67,8 @@ class SettingsDialog(QDialog):
         self.show_time = QCheckBox("자막 위에 원본 시간(예: 12:38) 표시")
         self.show_time.setChecked(settings.show_time_in_caption)
         self.ffmpeg_path = QLineEdit(settings.ffmpeg_path)
-        self.ffmpeg_path.setPlaceholderText("비우면 앱 폴더 bin\\ffmpeg.exe → PATH 순으로 찾음")
+        search_order = [f"앱 폴더 bin/{exe_name('ffmpeg')}", "PATH"] + (["기본 설치 폴더"] if fallback_dirs() else [])
+        self.ffmpeg_path.setPlaceholderText(f"비우면 {' → '.join(search_order)} 순으로 찾음")
         self.ffmpeg_status = QLabel()
         self.ffmpeg_path.textChanged.connect(self._refresh_ffmpeg_status)
         self._refresh_ffmpeg_status()
@@ -148,18 +149,25 @@ class SettingsDialog(QDialog):
             self.font_path.setText(f)
 
     def _browse_ffmpeg(self) -> None:
-        f, _ = QFileDialog.getOpenFileName(self, "ffmpeg.exe", "", "ffmpeg (ffmpeg.exe)")
+        exe = exe_name("ffmpeg")
+        f, _ = QFileDialog.getOpenFileName(self, "ffmpeg 실행 파일", "", f"ffmpeg ({exe});;모든 파일 (*)")
         if f:
             self.ffmpeg_path.setText(f)
 
     def _refresh_ffmpeg_status(self) -> None:
         found = find_ffmpeg(self.ffmpeg_path.text(), settings_mod.app_dir())
-        if found:
+        if found is None:
+            self.ffmpeg_status.setText(f"찾지 못함 — 터미널에서 `{install_hint()}` 후 새로 열거나 경로를 지정하세요")
+            self.ffmpeg_status.setStyleSheet("color: #d00000")
+        elif missing := missing_filters(found.ffmpeg):
+            self.ffmpeg_status.setText(
+                f"감지됨: {found.ffmpeg} — 하지만 {', '.join(missing)} 필터가 없어 자막을 그릴 수 없습니다. "
+                f"터미널에서 `{install_hint()}` 후 다시 여세요"
+            )
+            self.ffmpeg_status.setStyleSheet("color: #c06000")
+        else:
             self.ffmpeg_status.setText(f"감지됨: {found.ffmpeg}")
             self.ffmpeg_status.setStyleSheet("color: #2a8a2a")
-        else:
-            self.ffmpeg_status.setText("찾지 못함 — PowerShell에서 `winget install Gyan.FFmpeg` 후 새로 열거나 경로를 지정하세요")
-            self.ffmpeg_status.setStyleSheet("color: #d00000")
 
     # --- 도구 ---
     def _update_ytdlp(self) -> None:

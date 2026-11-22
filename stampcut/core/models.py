@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
+from stampcut.core import platforms
+
 KST = timezone(timedelta(hours=9))  # 화면·파일명에 쓰는 한국 시각
 
 
@@ -17,7 +19,7 @@ class Settings:
     post_seconds: int = 15
     max_total_seconds: int = 180
     cluster_window_seconds: float = 5.0
-    output_dir: str = "~/Videos/StampCut"
+    output_dir: str = field(default_factory=platforms.default_output_dir)  # Windows/Linux ~/Videos, macOS ~/Movies
     title_template: str = "{date} {channel} 하이라이트"
     background_color: str = "#000000"
     font_path: str = ""

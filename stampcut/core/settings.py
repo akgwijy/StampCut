@@ -7,18 +7,38 @@ import sys
 from dataclasses import asdict, fields
 from pathlib import Path
 
+from stampcut.core import platforms
 from stampcut.core.models import Settings
 
 APP_NAME = "StampCut"
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 
 
+def _env_path(var: str, default: Path) -> Path:
+    value = os.environ.get(var)
+    return Path(value) if value else default
+
+
 def config_dir() -> Path:
-    return Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
+    """설정·프로젝트 파일 위치. Windows %APPDATA%, macOS ~/Library/Application Support, Linux XDG."""
+    match platforms.current():
+        case "windows":
+            return _env_path("APPDATA", Path.home()) / APP_NAME
+        case "macos":
+            return Path.home() / "Library" / "Application Support" / APP_NAME
+        case _:
+            return _env_path("XDG_CONFIG_HOME", Path.home() / ".config") / APP_NAME
 
 
 def data_dir() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / APP_NAME
+    """캐시·렌더·미리보기·로그 위치. macOS는 config_dir와 같은 폴더를 쓴다."""
+    match platforms.current():
+        case "windows":
+            return _env_path("LOCALAPPDATA", Path.home()) / APP_NAME
+        case "macos":
+            return config_dir()
+        case _:
+            return _env_path("XDG_DATA_HOME", Path.home() / ".local" / "share") / APP_NAME
 
 
 def settings_path() -> Path:
@@ -45,7 +65,13 @@ def bundled_font_path() -> Path:
     p = ASSETS_DIR / "fonts" / "Pretendard-Bold.otf"
     if p.exists():
         return p
-    return Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "malgunbd.ttf"
+    match platforms.current():
+        case "windows":
+            return _env_path("WINDIR", Path(r"C:\Windows")) / "Fonts" / "malgunbd.ttf"
+        case "macos":
+            return Path("/System/Library/Fonts/AppleSDGothicNeo.ttc")
+        case _:
+            return Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
 
 
 def resolve_font(s: Settings) -> Path:
@@ -57,7 +83,7 @@ def resolve_output_dir(s: Settings) -> Path:
 
 
 def app_dir() -> Path | None:
-    """PyInstaller로 묶였을 때만 실행 파일 폴더를 돌려준다 (bin\\ffmpeg.exe 탐색용)."""
+    """PyInstaller로 묶였을 때만 실행 파일 폴더를 돌려준다 (bin/ffmpeg 탐색용)."""
     return Path(sys.executable).parent if getattr(sys, "frozen", False) else None
 
 

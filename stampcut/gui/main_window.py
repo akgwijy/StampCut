@@ -25,7 +25,8 @@ from stampcut.core import pipeline
 from stampcut.core import project_io
 from stampcut.core import settings as settings_mod
 from stampcut.core.downloader import Downloader, preview_covers
-from stampcut.core.ffmpeg import find_ffmpeg
+from stampcut.core import ffmpeg as ffmpeg_mod
+from stampcut.core.ffmpeg import find_ffmpeg, install_hint
 from stampcut.core.models import Clip, ClipStatus, Project, Settings
 from stampcut.core.renderer import unique_output_path
 from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
@@ -39,7 +40,8 @@ from stampcut.gui.url_panel import UrlPanel
 from stampcut.gui.workers import Worker
 
 log = logging.getLogger(__name__)
-FFMPEG_MISSING = "ffmpeg를 찾지 못했습니다 — ⚙ 설정에서 경로를 지정하세요 (설치: winget install Gyan.FFmpeg)"
+FFMPEG_MISSING = f"ffmpeg를 찾지 못했습니다 — ⚙ 설정에서 경로를 지정하세요 (설치: {install_hint()})"
+FFMPEG_NO_DRAWTEXT = f"이 ffmpeg에는 자막을 그리는 drawtext 필터가 없습니다 — 터미널에서 {install_hint()} 후 ⚙ 설정에서 경로를 확인하세요"
 
 
 class _ClipBridge(QObject):
@@ -137,8 +139,8 @@ class MainWindow(QMainWindow):
         self.status_panel.output_dir_changed.connect(self._on_output_dir_changed)
         self.status_panel.set_output_dir(settings_mod.resolve_output_dir(self.settings))
         self.status_panel.update_summary(None, self.settings)
-        if self.ffpaths is None:  # ffmpeg가 없으면 아무것도 못 하므로 API 키 안내보다 우선한다
-            self.status_panel.set_idle(FFMPEG_MISSING)
+        if problem := self._ffmpeg_problem():  # ffmpeg 문제는 결과물을 못 만들게 하므로 API 키 안내보다 우선한다
+            self.status_panel.set_idle(problem)
         elif not self.settings.api_key:
             self.status_panel.set_idle("⚙ 설정에서 YouTube API 키를 먼저 입력하세요")
 
@@ -177,6 +179,14 @@ class MainWindow(QMainWindow):
         # PyInstaller로 묶였을 때는 실행 파일 옆 bin\ffmpeg.exe를 먼저 찾는다 (스펙 §4 순서 ①).
         self.ffpaths = find_ffmpeg(self.settings.ffmpeg_path, settings_mod.app_dir())
         self.downloader = Downloader(settings_mod.cache_dir(), str(self.ffpaths.ffmpeg) if self.ffpaths else None)
+
+    def _ffmpeg_problem(self) -> str | None:
+        """ffmpeg가 없거나 렌더에 필요한 필터가 빠졌으면 안내 문구, 정상이면 None. 다운로드·클립 미리보기는 필터 없이도 된다."""
+        if self.ffpaths is None:
+            return FFMPEG_MISSING
+        if ffmpeg_mod.missing_filters(self.ffpaths.ffmpeg):
+            return FFMPEG_NO_DRAWTEXT
+        return None
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self.settings, self, busy=any(not w.done for w in self._workers))
@@ -230,8 +240,8 @@ class MainWindow(QMainWindow):
         if not project.clips:
             self.status_panel.set_idle("타임스탬프가 적힌 댓글이 없습니다")
             self._info("타임스탬프가 적힌 댓글이 없습니다.")
-        elif self.ffpaths is None:
-            self.status_panel.set_idle(FFMPEG_MISSING)
+        elif problem := self._ffmpeg_problem():
+            self.status_panel.set_idle(problem)
         if project.warnings:
             self._info("\n".join(project.warnings))
         self.analysis_done.emit()
@@ -253,7 +263,7 @@ class MainWindow(QMainWindow):
             if self.ffpaths is not None:
                 self.start_previews(project.clips)
         if restored:
-            self.status_panel.set_idle(FFMPEG_MISSING if self.ffpaths is None else "이전 작업을 불러왔습니다 — 이어서 편집하세요")
+            self.status_panel.set_idle(self._ffmpeg_problem() or "이전 작업을 불러왔습니다 — 이어서 편집하세요")
         self._schedule_autosave()
 
     def _on_analyze_failed(self, msg: str) -> None:
@@ -387,8 +397,8 @@ class MainWindow(QMainWindow):
         if not self.project or not self.project.enabled_clips():
             self._warn("켜진 클립이 없습니다.")
             return
-        if self.ffpaths is None:
-            self._warn(FFMPEG_MISSING)
+        if problem := self._ffmpeg_problem():
+            self._warn(problem)
             return
         self._set_busy(True)
         self.status_panel.set_idle("전체 미리보기 만드는 중")
@@ -416,8 +426,8 @@ class MainWindow(QMainWindow):
         if not self.project or not self.project.enabled_clips():
             self._warn("켜진 클립이 없습니다.")
             return
-        if self.ffpaths is None:
-            self._warn("ffmpeg를 찾지 못했습니다. 설정에서 경로를 지정하세요.\n(설치: winget install Gyan.FFmpeg)")
+        if problem := self._ffmpeg_problem():
+            self._warn(problem)
             self.open_settings()
             return
         if any(c.duration(self.settings) < 1 for c in self.project.enabled_clips()):

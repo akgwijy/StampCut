@@ -1,6 +1,6 @@
 # StampCut
 
-유튜브 댓글에 적힌 타임스탬프("7:05 기훈 선방", "원더골 12:38")를 모아 **릴스/쇼츠용 9:16 하이라이트 영상**을 자동으로 만드는 Windows 데스크톱 앱입니다. 관객(댓글)이 지목한 순간 = 하이라이트.
+유튜브 댓글에 적힌 타임스탬프("7:05 기훈 선방", "원더골 12:38")를 모아 **릴스/쇼츠용 9:16 하이라이트 영상**을 자동으로 만드는 Windows·macOS 데스크톱 앱입니다. 관객(댓글)이 지목한 순간 = 하이라이트.
 
 - 여러 유튜브 URL → 댓글 수집 → 타임스탬프 묶기 → 총 3분(조절 가능)까지 자동 선정
 - 전체 영상은 받지 않고 **필요한 구간만** 다운로드 (미리보기 360p, 최종 ≤1080p)
@@ -8,6 +8,8 @@
 - 출력: `1080x1920` mp4 한 파일 — 위 타이틀 띠, 가운데 정방형 영상, 아래 댓글 자막
 
 ## 설치
+
+**Windows** (PowerShell)
 
 ```powershell
 winget install Python.Python.3.12
@@ -18,6 +20,20 @@ python -m venv .venv
 pip install -e .[dev]
 python -m stampcut
 ```
+
+**macOS** (터미널, [Homebrew](https://brew.sh) 필요)
+
+```bash
+brew install python@3.12 ffmpeg-full
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+python -m stampcut
+```
+
+> `ffmpeg`가 아니라 **`ffmpeg-full`**이어야 합니다. Homebrew의 기본 `ffmpeg`는 2026년 1월부터 슬림 빌드라 자막을 그리는 `drawtext` 필터가 없습니다. `ffmpeg-full`은 PATH에 안 잡히지만(keg-only) 앱이 `/opt/homebrew/opt/ffmpeg-full/bin`을 자동으로 찾고, 둘 다 설치돼 있으면 drawtext가 있는 쪽을 고릅니다.
+
+Linux도 같은 방식으로 동작합니다 (`sudo apt install python3 ffmpeg`).
 
 ## YouTube API 키 발급 (무료, 5분)
 
@@ -46,14 +62,17 @@ python -m stampcut
 | 증상 | 조치 |
 |---|---|
 | 클립 상태 "오류", 다운로드 실패 | 유튜브가 바뀐 경우가 대부분 → **설정 → yt-dlp 업데이트** 후 앱 재시작. 행 우클릭 → 미리보기 다시 받기 |
-| "ffmpeg를 찾지 못했습니다" | `winget install Gyan.FFmpeg` 후 새 창에서 실행, 또는 설정에서 `ffmpeg.exe` 경로 지정 |
+| "ffmpeg를 찾지 못했습니다" | Windows `winget install Gyan.FFmpeg` / macOS `brew install ffmpeg-full` 후 앱 재시작, 또는 설정에서 ffmpeg 경로 지정 (macOS는 Homebrew 폴더를 자동으로 찾습니다) |
+| "drawtext 필터가 없습니다" | 자막 기능이 빠진 ffmpeg 빌드입니다. macOS는 `brew install ffmpeg-full`, 그 외는 libfreetype이 포함된 빌드로 바꾸세요 |
 | "API 키가 잘못되었거나…" | 키 복사 확인, 해당 프로젝트에서 YouTube Data API v3가 **사용** 상태인지 확인 |
 | 할당량 초과 | 태평양 자정(한국 오후 4~5시)에 초기화 |
-| 그 외 | 설정 → **로그 폴더 열기** (`%LOCALAPPDATA%\StampCut\logs\stampcut.log`) |
+| 그 외 | 설정 → **로그 폴더 열기** (Windows `%LOCALAPPDATA%\StampCut\logs`, macOS `~/Library/Application Support/StampCut/logs`, Linux `~/.local/share/StampCut/logs`) |
+
+설정·작업 파일은 Windows `%APPDATA%\StampCut`, macOS `~/Library/Application Support/StampCut`, Linux `~/.config/StampCut`에 저장되고, 출력 기본 폴더는 Windows/Linux `~/Videos/StampCut`, macOS `~/Movies/StampCut`입니다.
 
 ## 개발
 
-```powershell
+```bash
 pytest                 # 단위·GUI 테스트 (네트워크 불필요)
 pytest -m network -v   # 실제 다운로드 + ffmpeg 렌더 통합 테스트
 ```

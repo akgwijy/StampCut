@@ -145,6 +145,35 @@ def test_missing_ffmpeg_hints_and_skips_previews(qtbot, monkeypatch, make_video,
     assert "ffmpeg" in w.status_panel.message.text()
 
 
+def test_ffmpeg_without_drawtext_warns_but_still_downloads_previews(qtbot, monkeypatch, make_video, make_clip):
+    """Homebrew 슬림 ffmpeg처럼 drawtext가 없으면: 상태줄·렌더는 안내, 클립 미리보기(다운로드)는 그대로 진행."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from stampcut.core.ffmpeg import FfmpegPaths
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    monkeypatch.setattr(main_window, "find_ffmpeg", lambda *a, **k: FfmpegPaths(Path("/slim/ffmpeg"), Path("/slim/ffprobe")))
+    monkeypatch.setattr(main_window.ffmpeg_mod, "missing_filters", lambda p: ("drawtext",))
+    fetched = []
+    monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: fetched.append(1))
+    project, _ = _project_with_clip(make_video, make_clip)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    w = MainWindow(Settings(api_key="TEST"))
+    qtbot.addWidget(w)
+    monkeypatch.setattr(w, "open_settings", lambda: None)
+    assert "drawtext" in w.status_panel.message.text()
+    w.url_panel.urls_edit.setPlainText(project.videos[0].url)
+    with qtbot.waitSignal(w.analysis_done, timeout=5000):
+        w.start_analysis()
+    qtbot.waitUntil(lambda: fetched != [], timeout=5000)
+    assert "drawtext" in w.status_panel.message.text()
+    w.start_render()
+    assert warned and "drawtext" in warned[-1]
+    w.start_full_preview()
+    assert len(warned) == 2 and "drawtext" in warned[-1]
+
+
 def test_analyze_reports_skipped_videos(qtbot, monkeypatch, make_video, make_clip):
     from PySide6.QtWidgets import QMessageBox
 

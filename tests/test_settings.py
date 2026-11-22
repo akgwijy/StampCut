@@ -6,7 +6,8 @@ from stampcut.core import settings as sm
 from stampcut.core.models import Settings
 
 
-def test_dirs_follow_env(monkeypatch, tmp_path):
+def test_dirs_windows_follow_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     assert sm.settings_path() == tmp_path / "roaming" / "StampCut" / "settings.json"
@@ -14,6 +15,60 @@ def test_dirs_follow_env(monkeypatch, tmp_path):
     assert sm.render_dir() == tmp_path / "local" / "StampCut" / "render"
     assert sm.log_dir() == tmp_path / "local" / "StampCut" / "logs"
     assert sm.preview_dir() == tmp_path / "local" / "StampCut" / "preview"
+
+
+def test_dirs_windows_fall_back_to_home(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    assert sm.config_dir() == tmp_path / "StampCut"
+    assert sm.data_dir() == tmp_path / "StampCut"
+
+
+def test_dirs_macos_under_application_support(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "ignored"))  # Windows 변수가 있어도 무시
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    base = tmp_path / "Library" / "Application Support" / "StampCut"
+    assert sm.settings_path() == base / "settings.json"
+    assert sm.cache_dir() == base / "cache"
+    assert sm.log_dir() == base / "logs"
+
+
+def test_dirs_linux_follow_xdg(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    assert sm.config_dir() == tmp_path / "cfg" / "StampCut"
+    assert sm.data_dir() == tmp_path / "data" / "StampCut"
+
+
+def test_dirs_linux_defaults(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    assert sm.config_dir() == tmp_path / ".config" / "StampCut"
+    assert sm.data_dir() == tmp_path / ".local" / "share" / "StampCut"
+
+
+def test_default_output_dir_follows_platform(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert Settings().output_dir == "~/Movies/StampCut"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert Settings().output_dir == "~/Videos/StampCut"
+
+
+def test_font_fallback_per_platform(monkeypatch, tmp_path):
+    monkeypatch.setattr(sm, "ASSETS_DIR", tmp_path)  # 동봉 폰트가 없는 상황
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("WINDIR", str(tmp_path / "win"))
+    assert sm.bundled_font_path() == tmp_path / "win" / "Fonts" / "malgunbd.ttf"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert sm.bundled_font_path() == Path("/System/Library/Fonts/AppleSDGothicNeo.ttc")
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert sm.bundled_font_path().suffix == ".ttc"
 
 
 def test_load_missing_returns_defaults(tmp_path):
@@ -52,8 +107,9 @@ def test_app_dir_only_when_frozen(monkeypatch):
     monkeypatch.delattr(sys, "frozen", raising=False)
     assert sm.app_dir() is None
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", r"C:\apps\StampCut\StampCut.exe")
-    assert sm.app_dir() == Path(r"C:\apps\StampCut")
+    exe = Path(__file__).resolve().parent / "apps" / "StampCut" / "StampCut.exe"
+    monkeypatch.setattr(sys, "executable", str(exe))
+    assert sm.app_dir() == exe.parent
 
 
 def test_style_fields_roundtrip_and_legacy_defaults(tmp_path):

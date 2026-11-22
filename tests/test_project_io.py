@@ -68,6 +68,7 @@ def test_unknown_video_id_clip_skipped(tmp_path, make_video, make_clip):
 
 
 def test_project_path_under_config_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr("sys.platform", "win32")
     monkeypatch.setenv("APPDATA", str(tmp_path))
     assert project_io.project_path() == tmp_path / "StampCut" / "project.json"
 

@@ -33,3 +33,16 @@ def make_clip():
         return Clip(**base)
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _ffmpeg_filters_present(request, monkeypatch):
+    """테스트의 가짜 ffmpeg 경로(빈 파일)를 '필수 필터 있음'으로 취급한다.
+
+    실제 검사는 tests/test_ffmpeg.py가 원본(_REAL_MISSING_FILTERS)으로 직접 다루고,
+    network 통합 테스트는 진짜 ffmpeg 중 drawtext가 있는 것을 골라야 하므로 건드리지 않는다.
+    """
+    if "network" in request.keywords:
+        return
+    monkeypatch.setattr("stampcut.core.ffmpeg.missing_filters", lambda ffmpeg: ())
+    monkeypatch.setattr("stampcut.gui.settings_dialog.missing_filters", lambda ffmpeg: ())
