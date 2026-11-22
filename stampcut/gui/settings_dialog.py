@@ -51,7 +51,8 @@ class SettingsDialog(QDialog):
 
         self.api_key = QLineEdit(settings.api_key)
         self.api_key.setPlaceholderText("Google Cloud Console에서 발급한 YouTube Data API v3 키")
-        self.pre = self._spin(0, 120, settings.pre_seconds, "초")
+        self.pre = self._spin(-120, 120, -settings.pre_seconds, "초")
+        self.pre.setToolTip('댓글 시각 기준 시작 위치: -5초 = 5초 전, 0초 = 댓글 시각, 5초 = 5초 후')
         self.post = self._spin(0, 120, settings.post_seconds, "초")
         self.max_total = self._spin(10, 1800, settings.max_total_seconds, "초")
         self.cluster = QDoubleSpinBox()
@@ -98,7 +99,7 @@ class SettingsDialog(QDialog):
         form.addRow("출력 폴더", self._with_browse(self.output_dir, self._browse_dir))
         form.addRow("타이틀 템플릿", self.title_template)
         form.addRow("배경색 (#RRGGBB)", self.background)
-        form.addRow("자막 폰트 파일", self._with_browse(self.font_path, self._browse_font))
+        form.addRow("공통 기본 글꼴", self._with_browse(self.font_path, self._browse_font))
         form.addRow("", self.show_time)
         form.addRow("ffmpeg 경로", self._with_browse(self.ffmpeg_path, self._browse_ffmpeg))
         form.addRow("", self.ffmpeg_status)
@@ -197,7 +198,7 @@ class SettingsDialog(QDialog):
         return replace(
             self._initial,
             api_key=self.api_key.text().strip(),
-            pre_seconds=self.pre.value(),
+            pre_seconds=-self.pre.value(),
             post_seconds=self.post.value(),
             max_total_seconds=self.max_total.value(),
             cluster_window_seconds=self.cluster.value(),

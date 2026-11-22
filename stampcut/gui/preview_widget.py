@@ -5,12 +5,13 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QPainter, QPen, QRawFont
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QButtonGroup,
     QColorDialog,
+    QComboBox,
     QFormLayout,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -27,8 +28,12 @@ from PySide6.QtWidgets import (
 )
 
 from stampcut.core.bgm_sync import bgm_position
-from stampcut.core.models import AudioMix, Clip, Settings
-from stampcut.core.renderer import LAYOUT, TIME_GAP, ZOOM_MAX, ZOOM_MIN, SquareGeometry, compute_square_geometry
+from stampcut.core.models import CAPTION_STYLE_FIELDS, AudioMix, Clip, Settings
+from stampcut.core.settings import resolve_font
+from stampcut.core.layouts import layout_for
+from stampcut.core.output_modes import normalize_output_settings
+from stampcut.gui.font_picker import FontPicker
+from stampcut.core.renderer import FONT_SIZE_MIN, FONT_SIZE_MAX, LAYOUT, TIME_GAP, ZOOM_MAX, ZOOM_MIN, SquareGeometry, compute_square_geometry, compute_frame_geometry
 from stampcut.core.textwrap_kr import wrap
 from stampcut.core.timestamps import format_time
 
@@ -37,9 +42,9 @@ BGM_RESYNC_MS = 250  # 전체 미리보기와 BGM 위치 차이가 이보다 크
 BGM_SEEK_COOLDOWN_MS = 500  # 재동기 seek이 착지할 시간을 준다 (연속 seek 방지)
 
 
-def pan_after_drag(pan_x: float, pan_y: float, dx: float, dy: float, g: SquareGeometry, square: int = _S) -> tuple[float, float]:
+def pan_after_drag(pan_x: float, pan_y: float, dx: float, dy: float, g: SquareGeometry, square: int = _S, frame_h: int | None = None) -> tuple[float, float]:
     """영상의 정방형 내 위치 = (square - sw) * pan 이므로, 위치 변화량을 pan으로 되돌린다."""
-    denom_x, denom_y = square - g.sw, square - g.sh
+    denom_x, denom_y = square - g.sw, (frame_h if frame_h is not None else square) - g.sh
     if denom_x:
         pan_x += dx / denom_x
     if denom_y:
@@ -68,7 +73,7 @@ class _DragView(QGraphicsView):
         super().__init__(scene)
         self._on_drag = on_drag
         self._hit_test = hit_test or (lambda pos: None)
-        self._on_text_drag = on_text_drag or (lambda kind, dy: None)
+        self._on_text_drag = on_text_drag or (lambda kind, dx, dy: None)
         self._on_drag_end = on_drag_end or (lambda: None)
         self._last: QPointF | None = None
         self._target: str | None = None
@@ -94,7 +99,7 @@ class _DragView(QGraphicsView):
             d = p - self._last
             self._last = p
             if self._target:
-                self._on_text_drag(self._target, d.y())
+                self._on_text_drag(self._target, d.x(), d.y())
             else:
                 self._on_drag(d.x(), d.y())
 
@@ -116,8 +121,13 @@ class PreviewWidget(QWidget):
 
     def __init__(self, settings: Settings, font_family: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        settings = normalize_output_settings(settings)
         self.settings = settings
+        self.output_layout = layout_for(settings.output_mode)
         self.font_family = font_family
+        self._font_cache: dict[Path, QFont] = {}
+        self._caption_scope_common = False
+        self._caption_drag_clip: Clip | None = None
         self.clip: Clip | None = None
         self.title = ""
         self._source_size = (1920, 1080)
@@ -132,14 +142,14 @@ class PreviewWidget(QWidget):
         self._bgm_duration_ms = 0
         self._bgm_last_seek = 0.0  # time.monotonic()
 
-        L = LAYOUT
+        L = self.output_layout
         self._shut_down = False
         self.scene = QGraphicsScene(0, 0, L["canvas_w"], L["canvas_h"], self)
         self.bg_item = self.scene.addRect(QRectF(0, 0, L["canvas_w"], L["canvas_h"]), QPen(Qt.NoPen), QBrush(QColor(settings.background_color)))
-        self.square = QGraphicsRectItem(0, 0, _S, _S)
+        self.square = QGraphicsRectItem(0, 0, L["frame_w"], L["frame_h"])
         self.square.setPen(QPen(Qt.NoPen))
         self.square.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
-        self.square.setPos(0, L["square_y"])
+        self.square.setPos(L["frame_x"], L["frame_y"])
         self.scene.addItem(self.square)
         self._apply_background()
         self.video_item = QGraphicsVideoItem(self.square)
@@ -196,7 +206,8 @@ class PreviewWidget(QWidget):
         self.zoom_slider.valueChanged.connect(self._on_zoom)
         self.zoom_label = QLabel("1.00×")
         self.pre_spin = QSpinBox()
-        self.pre_spin.setRange(0, 120)
+        self.pre_spin.setRange(-120, 120)
+        self.pre_spin.setToolTip('댓글 시각 기준 시작 위치: -5초 = 5초 전, 0초 = 댓글 시각, 5초 = 5초 후')
         self.pre_spin.setSuffix("초")
         self.pre_spin.setKeyboardTracking(False)  # 타이핑 중간값마다 미리보기를 다시 받지 않도록
         self.pre_spin.valueChanged.connect(self._on_pre)
@@ -205,12 +216,32 @@ class PreviewWidget(QWidget):
         self.post_spin.setSuffix("초")
         self.post_spin.setKeyboardTracking(False)
         self.post_spin.valueChanged.connect(self._on_post)
+        self.caption_scope_combo = QComboBox()
+        self.caption_scope_combo.addItems(["이 클립", "공통 기본값"])
+        self.caption_scope_combo.setCurrentIndex(1)
+        self.caption_scope_combo.model().item(0).setEnabled(False)
+        self.caption_scope_combo.setToolTip("자막의 위치·글꼴·크기·색상을 적용할 범위입니다. 공통값은 개별 지정하지 않은 항목에 적용됩니다.")
+        self.caption_scope_combo.currentIndexChanged.connect(self._on_caption_scope_changed)
+        self.caption_reset_btn = QPushButton("공통값 사용")
+        self.caption_reset_btn.setToolTip("이 클립의 자막 설정을 해제하고 공통 기본값을 사용합니다")
+        self.caption_reset_btn.setEnabled(False)
+        self.caption_reset_btn.clicked.connect(self._reset_caption_style)
         self.caption_edit = QLineEdit()
         self.caption_edit.textChanged.connect(self._on_caption)
         self.title_color_btn = self._color_button(self.settings.title_color, self._on_title_color)
         self.title_y_spin = self._y_spin(self.settings.title_y, self._on_title_y)
         self.caption_color_btn = self._color_button(self.settings.caption_color, self._on_caption_color)
         self.caption_y_spin = self._y_spin(self.settings.caption_y, self._on_caption_y)
+        self.title_x_spin = self._style_spin(self.settings.title_x, 0, self.output_layout["canvas_w"], "title_x")
+        self.caption_x_spin = self._style_spin(self.settings.caption_x, 0, self.output_layout["canvas_w"], "caption_x")
+        self.title_size_spin = self._style_spin(self.settings.title_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX, "title_font_size", " px")
+        self.caption_size_spin = self._style_spin(self.settings.caption_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX, "caption_font_size", " px")
+        self.title_font_picker = FontPicker()
+        self.caption_font_picker = FontPicker()
+        self.title_font_picker.set_path(self.settings.title_font_path)
+        self.caption_font_picker.set_path(self.settings.caption_font_path)
+        self.title_font_picker.path_changed.connect(lambda path: self._on_text_style("title_font_path", path))
+        self.caption_font_picker.path_changed.connect(lambda path: self._on_text_style("caption_font_path", path))
         self.reset_btn = QPushButton("기본값으로")
         self.reset_btn.clicked.connect(self._reset)
 
@@ -226,17 +257,16 @@ class PreviewWidget(QWidget):
         srow.addWidget(QLabel("뒤"))
         srow.addWidget(self.post_spin)
         controls.addRow("클립", srow)
-        trow = QHBoxLayout()
-        trow.addWidget(QLabel("Y"))
-        trow.addWidget(self.title_y_spin)
-        trow.addWidget(self.title_color_btn)
-        trow.addStretch(1)
-        controls.addRow("타이틀", trow)
-        crow = QHBoxLayout()
-        crow.addWidget(self.caption_edit, 1)
-        crow.addWidget(self.caption_y_spin)
-        crow.addWidget(self.caption_color_btn)
-        controls.addRow("자막", crow)
+        controls.addRow("제목", self._text_style_row(self.title_x_spin, self.title_y_spin, self.title_size_spin, self.title_color_btn))
+        controls.addRow("글꼴", self.title_font_picker)
+        caption_row = QHBoxLayout()
+        caption_row.addWidget(self.caption_edit, 1)
+        caption_row.addWidget(QLabel("적용"))
+        caption_row.addWidget(self.caption_scope_combo)
+        caption_row.addWidget(self.caption_reset_btn)
+        controls.addRow("자막 내용", caption_row)
+        controls.addRow("자막", self._text_style_row(self.caption_x_spin, self.caption_y_spin, self.caption_size_spin, self.caption_color_btn))
+        controls.addRow("글꼴", self.caption_font_picker)
         controls.addRow(self.reset_btn)
 
         self.clip_mode_btn = QPushButton("클립")
@@ -289,11 +319,55 @@ class PreviewWidget(QWidget):
 
     def _y_spin(self, value: int, handler) -> QSpinBox:
         spin = QSpinBox()
-        spin.setRange(0, LAYOUT["canvas_h"])
+        spin.setRange(0, self.output_layout["canvas_h"])
         spin.setKeyboardTracking(False)
         spin.setValue(value)
         spin.valueChanged.connect(handler)
         return spin
+
+    def _style_spin(self, value: int, lo: int, hi: int, field: str, suffix: str = "") -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(lo, hi)
+        spin.setKeyboardTracking(False)
+        spin.setSuffix(suffix)
+        spin.setValue(value)
+        spin.valueChanged.connect(lambda value: self._on_text_style(field, value))
+        return spin
+
+    @staticmethod
+    def _text_style_row(x_spin, y_spin, size_spin, color_btn) -> QHBoxLayout:
+        row = QHBoxLayout()
+        for label, spin in (("X", x_spin), ("Y", y_spin), ("크기", size_spin)):
+            row.addWidget(QLabel(label))
+            row.addWidget(spin, 1)
+        row.addWidget(color_btn)
+        return row
+
+    def _caption_clip_mode(self) -> bool:
+        return self.clip is not None and not self._caption_scope_common
+
+    def _on_caption_scope_changed(self, index: int) -> None:
+        self._caption_scope_common = index == 1
+        self._sync_style_controls()
+
+    def _reset_caption_style(self) -> None:
+        if self.clip is None:
+            return
+        for name in CAPTION_STYLE_FIELDS:
+            setattr(self.clip, name, None)
+        self._sync_style_controls()
+        self.relayout()
+        self._emit()
+
+    def _on_text_style(self, field: str, value) -> None:
+        target = self.clip if field in CAPTION_STYLE_FIELDS and self._caption_clip_mode() else self.settings
+        setattr(target, field, value)
+        self._sync_style_controls()
+        self.relayout()
+        if target is self.clip:
+            self._emit()
+        else:
+            self.style_changed.emit()
 
     def _color_button(self, color: str, handler) -> QPushButton:
         btn = QPushButton()
@@ -311,6 +385,28 @@ class PreviewWidget(QWidget):
         for w in (self.play_btn, self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit, self.reset_btn,
                   self.seek_slider, self.back5_btn, self.back1_btn, self.fwd1_btn, self.fwd5_btn):
             w.setEnabled(on)
+
+    def _apply_layout(self) -> None:
+        self.output_layout = layout_for(self.settings.output_mode)
+        layout = self.output_layout
+        self.scene.setSceneRect(0, 0, layout["canvas_w"], layout["canvas_h"])
+        self.bg_item.setRect(self.scene.sceneRect())
+        self.square.setRect(0, 0, layout["frame_w"], layout["frame_h"])
+        self.square.setPos(layout["frame_x"], layout["frame_y"])
+        self.full_item.setSize(QSizeF(layout["canvas_w"], layout["canvas_h"]))
+        for spin, maximum in ((self.title_x_spin, layout["canvas_w"]), (self.caption_x_spin, layout["canvas_w"]),
+                              (self.title_y_spin, layout["canvas_h"]), (self.caption_y_spin, layout["canvas_h"])):
+            blocked = spin.blockSignals(True)
+            spin.setRange(0, maximum)
+            spin.blockSignals(blocked)
+        self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _frame_geometry(self, zoom: float, pan_x: float, pan_y: float) -> SquareGeometry:
+        layout = self.output_layout
+        if self.settings.output_mode == "shorts":
+            return compute_square_geometry(*self._source_size, zoom, pan_x, pan_y, layout["frame_w"])
+        return compute_frame_geometry(*self._source_size, zoom, pan_x, pan_y,
+                                      layout["frame_w"], layout["frame_h"], contain=True)
 
     def _apply_background(self) -> None:
         brush = QBrush(QColor(self.settings.background_color))
@@ -335,21 +431,36 @@ class PreviewWidget(QWidget):
 
     # --- 외부 API ---
     def set_settings(self, settings: Settings) -> None:
-        self.settings = settings
+        self.settings = normalize_output_settings(settings)
+        self._apply_layout()
         self._apply_background()
         self._sync_style_controls()
-        self.relayout()
-        self._update_seek_range()
+        if self.clip is not None:
+            self.sync_from_clip()
+        else:
+            self.relayout()
+            self._update_seek_range()
 
     def _sync_style_controls(self) -> None:
-        for w in (self.title_y_spin, self.caption_y_spin):
-            w.blockSignals(True)
-        self.title_y_spin.setValue(self.settings.title_y)
-        self.caption_y_spin.setValue(self.settings.caption_y)
-        for w in (self.title_y_spin, self.caption_y_spin):
-            w.blockSignals(False)
+        caption = self.clip.caption_settings(self.settings) if self._caption_clip_mode() else self.settings
+        self.caption_scope_combo.model().item(0).setEnabled(self.clip is not None)
+        blocked = self.caption_scope_combo.blockSignals(True)
+        self.caption_scope_combo.setCurrentIndex(0 if self._caption_clip_mode() else 1)
+        self.caption_scope_combo.blockSignals(blocked)
+        self.caption_reset_btn.setEnabled(self._caption_clip_mode() and any(getattr(self.clip, name) is not None for name in CAPTION_STYLE_FIELDS))
+        values = (
+            (self.title_x_spin, self.settings.title_x), (self.title_y_spin, self.settings.title_y),
+            (self.caption_x_spin, caption.caption_x), (self.caption_y_spin, caption.caption_y),
+            (self.title_size_spin, self.settings.title_font_size), (self.caption_size_spin, caption.caption_font_size),
+        )
+        for widget, value in values:
+            blocked = widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(blocked)
+        self.title_font_picker.set_path(self.settings.title_font_path)
+        self.caption_font_picker.set_path(caption.caption_font_path)
         self._paint_color_button(self.title_color_btn, self.settings.title_color)
-        self._paint_color_button(self.caption_color_btn, self.settings.caption_color)
+        self._paint_color_button(self.caption_color_btn, caption.caption_color)
 
     def pause(self) -> None:
         """재생 중이면 일시정지 (BGM 동기 플레이어 포함). 재생 중이 아니면 아무 일도 없다."""
@@ -363,7 +474,10 @@ class PreviewWidget(QWidget):
         self.relayout()
 
     def set_clip(self, clip: Clip | None) -> None:
+        if clip is not self.clip:
+            self._caption_scope_common = False
         self.clip = clip
+        self._sync_style_controls()
         if self._mode == "full":
             return  # 전체 모드에선 선택만 기억하고, 클립 모드로 돌아올 때 반영한다
         self.player.stop()
@@ -510,24 +624,30 @@ class PreviewWidget(QWidget):
 
     # --- 배치 ---
     def relayout(self) -> None:
-        L = LAYOUT
+        L = self.output_layout
         clip = self.clip
         zoom, pan_x, pan_y = (clip.zoom, clip.pan_x, clip.pan_y) if clip else (1.0, 0.5, 0.5)
-        w, h = self._source_size
-        g = compute_square_geometry(w, h, zoom, pan_x, pan_y, _S)
-        x, y, vw, vh = video_item_placement(g, _S)
+        g = self._frame_geometry(zoom, pan_x, pan_y)
+        x, y, vw, vh = video_item_placement(g)
         self.video_item.setSize(QSizeF(vw, vh))
         self.video_item.setPos(x, y)
-        s = self.settings
+        s = clip.caption_settings(self.settings) if clip is not None else self.settings
+        title_size = min(max(s.title_font_size, FONT_SIZE_MIN), FONT_SIZE_MAX)
+        caption_size = min(max(s.caption_font_size, FONT_SIZE_MIN), FONT_SIZE_MAX)
+        self._apply_text_font(self.title_item, resolve_font(s, "title"), title_size)
+        self._apply_text_font(self.caption_item, resolve_font(s, "caption"), caption_size)
+        self._apply_text_font(self.time_item, resolve_font(s, "caption"), L["time_font"])
+        title_x = min(max(s.title_x, 0), L["canvas_w"])
+        caption_x = min(max(s.caption_x, 0), L["canvas_w"])
         title_y = min(max(s.title_y, 0), L["canvas_h"])
         caption_y = min(max(s.caption_y, 0), L["canvas_h"])
         self.title_item.setBrush(QBrush(QColor(s.title_color)))
         self.caption_item.setBrush(QBrush(QColor(s.caption_color)))
-        self._place_text(self.title_item, wrap(self.title, L["title_font"], L["max_text_width"], L["max_lines"]), center=title_y)
+        self._place_text(self.title_item, wrap(self.title, title_size, L["max_text_width"], L["max_lines"]), center=title_y, center_x=title_x)
         show_time = bool(clip) and s.show_time_in_caption
         if clip:
-            self._place_text(self.time_item, format_time(clip.t), top=caption_y - TIME_GAP)
-            self._place_text(self.caption_item, wrap(clip.caption, L["caption_font"], L["max_text_width"], L["max_lines"]), top=caption_y)
+            self._place_text(self.time_item, format_time(clip.t), top=caption_y - TIME_GAP, center_x=caption_x)
+            self._place_text(self.caption_item, wrap(clip.caption, caption_size, L["max_text_width"], L["max_lines"]), top=caption_y, center_x=caption_x)
         full = self._mode == "full"
         self.title_item.setVisible(not full)
         self.time_item.setVisible(show_time and not full)
@@ -535,22 +655,38 @@ class PreviewWidget(QWidget):
         self.square.setVisible(not full)
         self.full_item.setVisible(full)
 
-    def _place_text(self, item: QGraphicsSimpleTextItem, text: str, top: float | None = None, center: float | None = None) -> None:
+    def _apply_text_font(self, item: QGraphicsSimpleTextItem, path: Path, size: int) -> None:
+        if path not in self._font_cache:
+            family = load_font_family(path)
+            raw = QRawFont(str(path), 16)
+            font = QFont(family if raw.isValid() else self.font_family)
+            if raw.isValid():
+                font.setStyleName(raw.styleName())
+                font.setWeight(QFont.Weight(raw.weight()))
+                font.setStyle(raw.style())
+            self._font_cache[path] = font
+        font = QFont(self._font_cache[path])
+        font.setPixelSize(size)
+        item.setFont(font)
+
+    def _place_text(self, item: QGraphicsSimpleTextItem, text: str, top: float | None = None, center: float | None = None, center_x: float | None = None) -> None:
         item.setText(text)
         r = item.boundingRect()
         y = center - r.height() / 2 if center is not None else float(top or 0)
-        item.setPos((LAYOUT["canvas_w"] - r.width()) / 2, y)
+        center_x = self.output_layout["canvas_w"] / 2 if center_x is None else center_x
+        item.setPos(center_x - r.width() / 2, y)
 
     def sync_from_clip(self) -> None:
         """클립 값을 컨트롤과 배치에 반영한다 (clip_changed를 내지 않음)."""
         clip = self.clip
         if clip is None:
             return
+        self._sync_style_controls()
         for w in (self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit):
             w.blockSignals(True)
         self.zoom_slider.setValue(int(round(clip.zoom * 100)))
         self.zoom_label.setText(f"{clip.zoom:.2f}×")
-        self.pre_spin.setValue(clip.effective_pre(self.settings))
+        self.pre_spin.setValue(-clip.effective_pre(self.settings))
         self.post_spin.setValue(clip.effective_post(self.settings))
         self.caption_edit.setText(clip.caption)
         for w in (self.zoom_slider, self.pre_spin, self.post_spin, self.caption_edit):
@@ -643,9 +779,8 @@ class PreviewWidget(QWidget):
         clip = self.clip
         if clip is None or self._mode == "full":
             return
-        w, h = self._source_size
-        g = compute_square_geometry(w, h, clip.zoom, clip.pan_x, clip.pan_y, _S)
-        clip.pan_x, clip.pan_y = pan_after_drag(clip.pan_x, clip.pan_y, dx, dy, g, _S)
+        g = self._frame_geometry(clip.zoom, clip.pan_x, clip.pan_y)
+        clip.pan_x, clip.pan_y = pan_after_drag(clip.pan_x, clip.pan_y, dx, dy, g, self.output_layout["frame_w"], self.output_layout["frame_h"])
         self.relayout()
         self._emit()
 
@@ -656,17 +791,24 @@ class PreviewWidget(QWidget):
             return "caption"
         return None
 
-    def _on_text_drag(self, kind: str, dy: float) -> None:
-        L = LAYOUT
-        if kind == "title":
-            self.settings.title_y = int(round(min(max(self.settings.title_y + dy, 0), L["canvas_h"])))
-        else:
-            self.settings.caption_y = int(round(min(max(self.settings.caption_y + dy, 0), L["canvas_h"])))
+    def _on_text_drag(self, kind: str, dx: float, dy: float) -> None:
+        self._caption_drag_clip = self.clip if kind == "caption" and self._caption_clip_mode() else None
+        target = self._caption_drag_clip if self._caption_drag_clip is not None else self.settings
+        effective = target.caption_settings(self.settings) if self._caption_drag_clip is not None else self.settings
+        for axis, delta, maximum in (("x", dx, self.output_layout["canvas_w"]), ("y", dy, self.output_layout["canvas_h"])):
+            field = f"{kind}_{axis}"
+            value = int(round(min(max(getattr(effective, field) + delta, 0), maximum)))
+            setattr(target, field, value)
         self._sync_style_controls()
         self.relayout()
 
     def _on_text_drag_end(self) -> None:
-        self.style_changed.emit()
+        clip = self._caption_drag_clip
+        self._caption_drag_clip = None
+        if clip is not None:
+            self.clip_changed.emit(clip)
+        else:
+            self.style_changed.emit()
 
     def _on_zoom(self, value: int) -> None:
         snapped = int(round(value / 5)) * 5
@@ -684,7 +826,8 @@ class PreviewWidget(QWidget):
     def _on_pre(self, value: int) -> None:
         if self.clip is None:
             return
-        self.clip.pre = value
+        # Stored pre remains a lead-in duration for existing projects.
+        self.clip.pre = -value
         self._update_seek_range()
         self._emit()
 
@@ -707,6 +850,8 @@ class PreviewWidget(QWidget):
         if clip is None:
             return
         clip.pre = clip.post = None
+        for name in CAPTION_STYLE_FIELDS:
+            setattr(clip, name, None)
         clip.zoom, clip.pan_x, clip.pan_y = 1.0, 0.5, 0.5
         self.sync_from_clip()
         self._emit()
@@ -717,9 +862,7 @@ class PreviewWidget(QWidget):
         self.style_changed.emit()
 
     def _on_caption_y(self, value: int) -> None:
-        self.settings.caption_y = value
-        self.relayout()
-        self.style_changed.emit()
+        self._on_text_style("caption_y", value)
 
     def _pick_color(self, current: str) -> str | None:
         c = QColorDialog.getColor(QColor(current), self, "색상 선택")
@@ -731,7 +874,8 @@ class PreviewWidget(QWidget):
             self._set_title_color(c)
 
     def _on_caption_color(self) -> None:
-        c = self._pick_color(self.settings.caption_color)
+        caption = self.clip.caption_settings(self.settings) if self._caption_clip_mode() else self.settings
+        c = self._pick_color(caption.caption_color)
         if c is not None:
             self._set_caption_color(c)
 
@@ -742,7 +886,4 @@ class PreviewWidget(QWidget):
         self.style_changed.emit()
 
     def _set_caption_color(self, color: str) -> None:
-        self.settings.caption_color = color
-        self._paint_color_button(self.caption_color_btn, color)
-        self.relayout()
-        self.style_changed.emit()
+        self._on_text_style("caption_color", color)

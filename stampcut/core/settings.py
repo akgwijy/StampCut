@@ -9,6 +9,7 @@ from pathlib import Path
 
 from stampcut.core import platforms
 from stampcut.core.models import Settings
+from stampcut.core.output_modes import normalize_output_settings
 
 APP_NAME = "StampCut"
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
@@ -74,7 +75,13 @@ def bundled_font_path() -> Path:
             return Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
 
 
-def resolve_font(s: Settings) -> Path:
+def resolve_font(s: Settings, role: str | None = None, fallback: Path | None = None) -> Path:
+    """역할별 폰트. 지워지거나 연결 해제된 폰트는 공통 기본 폰트로 되돌린다."""
+    override = s.title_font_path if role == "title" else s.caption_font_path if role == "caption" else ""
+    if override and Path(override).is_file():
+        return Path(override)
+    if fallback is not None:
+        return fallback
     return Path(s.font_path) if s.font_path else bundled_font_path()
 
 
@@ -99,7 +106,7 @@ def load(path: Path | None = None) -> Settings:
         return Settings()
     known = {f.name for f in fields(Settings)}
     try:
-        return Settings(**{k: v for k, v in data.items() if k in known})
+        return normalize_output_settings(Settings(**{k: v for k, v in data.items() if k in known}))
     except TypeError:
         return Settings()
 

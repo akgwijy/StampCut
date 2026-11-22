@@ -1,9 +1,19 @@
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtWidgets import QDialog, QPushButton, QTableWidget
 
-from stampcut.core.models import AudioMix, Project, Settings
+from stampcut.core import project_io
+from stampcut.core.highlights import build_clips
+from stampcut.core.downloader import DownloadCancelled, DownloadFailed
+from stampcut.core.ffmpeg import FfmpegPaths
+from stampcut.core.models import AudioMix, ClipStatus, Project, RawComment, Settings
+from stampcut.core.timestamps import extract_mentions
 from stampcut.gui import main_window
 from stampcut.gui.main_window import MainWindow
 
@@ -32,6 +42,142 @@ def test_analyze_fills_table_and_preview(qtbot, monkeypatch, make_video, make_cl
     assert w.preview.clip is clip
     assert "클립 1개" in w.status_panel.summary.text()
     assert w.status_panel.render_btn.isEnabled()
+
+
+def test_url_export_copies_each_comment_timestamp_from_restored_analysis(qtbot, monkeypatch, tmp_path, make_video):
+    video = make_video(title="함지FC, 1경기")
+    comments = [
+        RawComment("first", "12:38 첫 골\n12:40 패스 <좋다>", "응원", 1, False),
+        RawComment("second", "12:38 좋은 슛", "팀원", 0, False),
+    ]
+    mentions = [mention for comment in comments for mention in extract_mentions(video, comment)]
+    clips = build_clips(mentions, [video], Settings())
+    assert len(clips) == 1
+    clips[0].caption = "편집한 자막"
+    clips[0].enabled = False
+    path = tmp_path / "project.json"
+    project_io.save(Project([video.url], "제목", [video], clips), path)
+
+    w = MainWindow(Settings(), project_file=path)
+    qtbot.addWidget(w)
+    qtbot.mouseClick(w.url_panel.export_btn, Qt.MouseButton.LeftButton)
+    dialog = w.findChild(QDialog, "commentUrlExport")
+    assert dialog is not None and dialog.isVisible()
+    table = dialog.findChild(QTableWidget)
+    assert table.item(2, 3).text() == "https://www.youtube.com/watch?v=POZWcyKFvjY&t=760s"
+    assert "패스 <좋다>" in table.item(2, 2).text()
+
+    copied = []
+    monkeypatch.setattr(QGuiApplication, "clipboard", lambda: SimpleNamespace(setText=copied.append))
+    buttons = {button.text(): button for button in dialog.findChildren(QPushButton)}
+    qtbot.mouseClick(buttons["전체 복사"], Qt.MouseButton.LeftButton)
+    assert len(copied) == 1 and copied[0].splitlines() == [
+        '"함지FC, 1경기",12:38,12:38 첫 골 12:40 패스 <좋다>,https://www.youtube.com/watch?v=POZWcyKFvjY&t=758s',
+        '"함지FC, 1경기",12:38,12:38 좋은 슛,https://www.youtube.com/watch?v=POZWcyKFvjY&t=758s',
+        '"함지FC, 1경기",12:40,12:38 첫 골 12:40 패스 <좋다>,https://www.youtube.com/watch?v=POZWcyKFvjY&t=760s',
+    ]
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
+    table.selectRow(2)
+    table.cellClicked.emit(2, 3)
+    assert opened == ["https://www.youtube.com/watch?v=POZWcyKFvjY&t=760s"]
+    buttons["한 줄 복사"].click()
+    assert copied[-1] == copied[0].splitlines()[2]
+    buttons["링크만 복사"].click()
+    assert copied[-1] == opened[0]
+
+
+def test_deletion_from_both_lists_updates_clip_selection_and_saved_project(qtbot, tmp_path, make_video):
+    video = make_video()
+    comments = [
+        RawComment("first", "1:00 골 1:02 세리머니", "응원", 0, False),
+        RawComment("second", "3:00 선방", "응원", 0, False),
+        RawComment("third", "5:00 패스", "응원", 0, False),
+    ]
+    mentions = [mention for comment in comments for mention in extract_mentions(video, comment)]
+    clips = build_clips(mentions, [video], Settings())
+    _, second, third = clips
+    path = tmp_path / "project.json"
+    project_io.save(Project([video.url], "제목", [video], clips), path)
+    w = MainWindow(Settings(), project_file=path)
+    qtbot.addWidget(w)
+    w.url_panel.export_btn.click()
+    dialog = w.findChild(QDialog, "commentUrlExport")
+    assert dialog is not None
+    urls = dialog.findChild(QTableWidget)
+    assert urls.rowCount() == 4
+    urls.selectRow(1)
+    delete_btn = next(button for button in dialog.findChildren(QPushButton) if button.text() == "클립 삭제")
+    delete_btn.click()
+    assert [clip.id for clip in w.model.clips] == [second.id, third.id]
+    assert [urls.item(row, 1).text() for row in range(urls.rowCount())] == ["3:00", "5:00"]
+    assert w.preview.clip.id == second.id
+    dialog.close()
+    qtbot.waitUntil(lambda: w.findChild(QDialog, "commentUrlExport") is None)
+
+    w.table.selectRow(0)
+    w.delete_clip_action.trigger()
+    assert [clip.id for clip in w.project.clips] == [third.id]
+    w._flush_autosave()
+    restored = project_io.load(path)
+    assert [clip.id for clip in restored.clips] == [third.id]
+    w.url_panel.export_btn.click()
+    final_dialog = w.findChild(QDialog, "commentUrlExport")
+    remaining = final_dialog.findChild(QTableWidget)
+    assert remaining.rowCount() == 1 and remaining.item(0, 1).text() == "5:00"
+    next(button for button in final_dialog.findChildren(QPushButton) if button.text() == "클립 삭제").click()
+    assert remaining.rowCount() == 0 and not w.project.clips
+    assert w.preview.clip is None and not w.url_panel.export_btn.isEnabled()
+
+
+def test_preview_download_waits_for_start_and_resumes_unfinished_clips(qtbot, monkeypatch, tmp_path, make_video, make_clip):
+    video = make_video()
+    first, second, third = [make_clip(video, seconds) for seconds in (100, 300, 500)]
+    project = Project([video.url], "제목", [video], [first, second, third])
+    monkeypatch.setattr(main_window, "find_ffmpeg", lambda *a: FfmpegPaths(tmp_path / "ffmpeg.exe", tmp_path / "ffprobe.exe"))
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda *a, **k: project)
+    w = MainWindow(Settings(api_key="TEST", parallel_downloads=1))
+    qtbot.addWidget(w)
+    w.url_panel.urls_edit.setPlainText(video.url)
+    queued = []
+    with monkeypatch.context() as analysis:
+        analysis.setattr(w.pool, "start", queued.append)
+        w.start_analysis()
+        queued.pop().run()
+        for unexpected_worker in queued:
+            unexpected_worker.done = True
+        assert not queued
+    assert all(clip.status is ClipStatus.PENDING for clip in project.clips)
+
+    downloading_second = Event()
+    calls = []
+
+    def download(clip, settings, cancel):
+        calls.append(clip.t)
+        if clip is second and calls.count(second.t) == 1:
+            downloading_second.set()
+            if cancel.wait(3):
+                raise DownloadCancelled()
+            raise DownloadFailed("중지 신호 없음")
+        clip.preview_path = tmp_path / f"{clip.t}.mp4"
+        clip.preview_path.write_bytes(b"preview")
+        clip.preview_start, clip.preview_end = 0, video.duration
+
+    monkeypatch.setattr(w.downloader, "download_preview", download)
+    monkeypatch.setattr(w.preview, "refresh_media", lambda: None)
+    w.preview_download_btn.click()
+    qtbot.waitUntil(downloading_second.is_set)
+    assert w.preview_download_btn.text() == "다운로드 중지"
+    w.preview_download_btn.click()
+    qtbot.waitUntil(w.preview_download_btn.isEnabled)
+    assert calls == [100, 300]
+    assert first.status is ClipStatus.READY and first.preview_path.is_file()
+    assert second.status is third.status is ClipStatus.PENDING
+
+    w.preview_download_btn.click()
+    qtbot.waitUntil(lambda: w.preview_download_btn.text() == "다운로드 시작")
+    assert calls == [100, 300, 300, 500]
+    assert all(clip.status is ClipStatus.READY for clip in project.clips)
 
 
 def test_analyze_refuses_invalid_url(qtbot, monkeypatch):
@@ -166,8 +312,11 @@ def test_ffmpeg_without_drawtext_warns_but_still_downloads_previews(qtbot, monke
     w.url_panel.urls_edit.setPlainText(project.videos[0].url)
     with qtbot.waitSignal(w.analysis_done, timeout=5000):
         w.start_analysis()
-    qtbot.waitUntil(lambda: fetched != [], timeout=5000)
     assert "drawtext" in w.status_panel.message.text()
+    assert fetched == []
+    w.preview_download_btn.click()
+    qtbot.waitUntil(lambda: fetched != [], timeout=5000)
+    qtbot.waitUntil(lambda: w._preview_worker is None, timeout=5000)
     w.start_render()
     assert warned and "drawtext" in warned[-1]
     w.start_full_preview()
@@ -213,7 +362,7 @@ def test_render_refuses_zero_length_clip(qtbot, monkeypatch, tmp_path, make_vide
 def test_left_column_layout_and_full_width_table(qtbot):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QHeaderView
-    from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME
+    from stampcut.gui.clip_table import COL_CAPTION, COL_POST, COL_PRE, COL_TIME, COL_VIDEO
 
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
@@ -223,17 +372,20 @@ def test_left_column_layout_and_full_width_table(qtbot):
     assert w.preview.controls_panel.window() is w  # 세부 설정이 메인 창 안에 배치됨
     assert w.preview.parentWidget() is not left  # 미리보기는 오른쪽
     header = w.table.horizontalHeader()
-    # 시간·앞·뒤는 편집 가능한 넉넉한 고정 폭, 자막이 남는 폭을 흡수, 나머지는 내용 크기
+    # 영상 제목은 길이에 관계없이 조절 가능한 폭, 시간·앞·뒤는 고정 폭, 자막은 남는 폭을 사용
     fixed_widths = {COL_TIME: 76, COL_PRE: 64, COL_POST: 64}
     for col in range(w.model.columnCount()):
         if col == COL_CAPTION:
             assert header.sectionResizeMode(col) == QHeaderView.Stretch
+        elif col == COL_VIDEO:
+            assert header.sectionResizeMode(col) == QHeaderView.Interactive
+            assert header.sectionSize(col) == 180
         elif col in fixed_widths:
             assert header.sectionResizeMode(col) == QHeaderView.Fixed
             assert header.sectionSize(col) == fixed_widths[col]
         else:
             assert header.sectionResizeMode(col) == QHeaderView.ResizeToContents
-    assert w.table.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    assert w.table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
 
 
 def test_busy_locks_detached_controls_panel(qtbot):
@@ -306,7 +458,7 @@ def test_style_change_saves_settings(qtbot, monkeypatch):
     w.preview.title_y_spin.setValue(300)
     assert saved and saved[-1] is w.settings and w.settings.title_y == 300
     saved.clear()
-    w.preview._on_text_drag("caption", -30.0)
+    w.preview._on_text_drag("caption", 0, -30.0)
     assert not saved  # 드래그 중에는 저장하지 않음
     w.preview._on_text_drag_end()
     assert saved and w.settings.caption_y == 1522

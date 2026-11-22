@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable
 
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError, download_range_func
+from yt_dlp.downloader import external
+from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
+from yt_dlp.utils import DownloadError, Popen, download_range_func
 
 from stampcut.core.models import Clip, Settings
 
@@ -22,6 +26,33 @@ class DownloadFailed(Exception):
 
 class DownloadCancelled(Exception):
     pass
+
+
+_download_cancel: ContextVar[threading.Event | None] = ContextVar("download_cancel", default=None)
+
+
+class _CancellableExternalProcess(Popen):
+    def __init__(self, *args, **kwargs):
+        self._cancel_event = _download_cancel.get()
+        super().__init__(*args, **kwargs)
+
+    def wait(self, timeout=None):
+        cancel = self._cancel_event
+        if timeout is not None or cancel is None:
+            return super().wait(timeout)
+        while True:
+            try:
+                return super().wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                if cancel.is_set():
+                    # yt-dlp catches the exception, kills the child and waits for it.
+                    self._cancel_event = None
+                    raise DownloadCancelled() from None
+
+
+# FFmpeg's external downloader only notifies progress hooks when it exits.
+# Scope interruptible waits to the worker making a StampCut download.
+external.Popen = _CancellableExternalProcess
 
 
 def _remove_partials(out: Path) -> None:
@@ -99,6 +130,13 @@ class Downloader:
         if self.ffmpeg_location:
             opts["ffmpeg_location"] = self.ffmpeg_location
         log.info("download %s [%s-%s] -> %s", url, start, end, out)
+        # Match the yt-dlp CLI: downloader selection checks for FFmpeg before
+        # it has access to the YoutubeDL options.
+        location_context = getattr(FFmpegPostProcessor, "_ffmpeg_location", None)
+        location_token = None
+        if self.ffmpeg_location and location_context is not None:
+            location_token = location_context.set(self.ffmpeg_location)
+        cancel_token = _download_cancel.set(cancel)
         try:
             with self.ydl_factory(opts) as ydl:
                 ydl.download([url])
@@ -107,6 +145,10 @@ class Downloader:
             raise
         except DownloadError as e:
             raise DownloadFailed(str(e)) from e
+        finally:
+            _download_cancel.reset(cancel_token)
+            if location_token is not None:
+                location_context.reset(location_token)
         if not out.exists() or out.stat().st_size == 0:
             _remove_partials(out)
             raise DownloadFailed("다운로드 결과 파일이 없습니다")

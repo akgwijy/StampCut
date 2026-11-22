@@ -8,7 +8,7 @@ def test_dialog_roundtrip(qtbot):
     s = Settings(pre_seconds=7, api_key="K", output_dir="E:/out", ffmpeg_path="C:/ff")
     d = SettingsDialog(s)
     qtbot.addWidget(d)
-    assert d.pre.value() == 7 and d.api_key.text() == "K" and d.output_dir.text() == "E:/out" and d.ffmpeg_path.text() == "C:/ff"
+    assert d.pre.value() == -7 and d.api_key.text() == "K" and d.output_dir.text() == "E:/out" and d.ffmpeg_path.text() == "C:/ff"
     d.post.setValue(20)
     d.show_time.setChecked(False)
     d.background.setText("#112233")
@@ -85,3 +85,19 @@ def test_cache_button_disabled_while_busy(qtbot):
     idle = SettingsDialog(Settings())
     qtbot.addWidget(idle)
     assert idle.cache_btn.isEnabled() is True
+
+
+def test_negative_default_start_offset_applies_to_clip(qtbot, tmp_path, make_video, make_clip):
+    from stampcut.core import settings as settings_mod
+
+    dialog = SettingsDialog(Settings())
+    qtbot.addWidget(dialog)
+    dialog.pre.setValue(-5)
+    path = tmp_path / 'settings.json'
+    settings_mod.save(dialog.result_settings(), path)
+    settings = settings_mod.load(path)
+    clip = make_clip(make_video(), t=60)
+    assert clip.start(settings) == 55
+    restored_dialog = SettingsDialog(settings)
+    qtbot.addWidget(restored_dialog)
+    assert restored_dialog.pre.value() == -5

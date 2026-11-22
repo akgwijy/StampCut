@@ -1,3 +1,5 @@
+import pytest
+
 from PySide6.QtCore import Qt
 
 from stampcut.core.models import ClipStatus, Settings
@@ -8,6 +10,7 @@ from stampcut.gui.clip_table import (
     COL_PRE,
     COL_STATUS,
     COL_TIME,
+    COL_VIDEO,
     ClipTableModel,
     status_text,
 )
@@ -18,8 +21,12 @@ def test_display_and_defaults(qtbot, make_video, make_clip):
     clip = make_clip(make_video(), t=758, caption="원더골")
     m.set_clips([clip])
     assert (m.rowCount(), m.columnCount()) == (1, 7)
+    assert m.headerData(COL_VIDEO, Qt.Horizontal) == "영상 제목"
+    assert m.data(m.index(0, COL_VIDEO)) == clip.video.title
+    assert m.data(m.index(0, COL_VIDEO), Qt.ToolTipRole) == clip.video.title
+    assert not m.flags(m.index(0, COL_VIDEO)) & Qt.ItemIsEditable
     assert m.data(m.index(0, COL_TIME)) == "12:38" and m.data(m.index(0, COL_CAPTION)) == "원더골"
-    assert m.data(m.index(0, COL_PRE)) == 3 and m.data(m.index(0, COL_POST)) == 15
+    assert m.data(m.index(0, COL_PRE)) == -3 and m.data(m.index(0, COL_POST)) == 15
     assert m.data(m.index(0, COL_ENABLED), Qt.CheckStateRole) == Qt.Checked
     assert m.data(m.index(0, COL_STATUS)) == "대기"
     assert m.data(m.index(0, COL_PRE), Qt.ForegroundRole) is not None  # 기본값은 회색
@@ -35,7 +42,7 @@ def test_setdata_toggle_caption_and_seconds(qtbot, make_video, make_clip):
     assert m.setData(m.index(0, COL_ENABLED), Qt.Checked, Qt.CheckStateRole)
     assert clip.enabled and not clip.over_limit
     assert m.setData(m.index(0, COL_CAPTION), " 종범 골 ", Qt.EditRole) and clip.caption == "종범 골"
-    assert m.setData(m.index(0, COL_PRE), 5, Qt.EditRole) and clip.pre == 5
+    assert m.setData(m.index(0, COL_PRE), -5, Qt.EditRole) and clip.pre == 5
     assert m.setData(m.index(0, COL_POST), 500, Qt.EditRole) and clip.post == 120
     assert m.data(m.index(0, COL_PRE), Qt.ForegroundRole) is None
     assert len(changes) == 4
@@ -82,3 +89,26 @@ def test_seconds_delegate_has_no_arrow_buttons(qtbot):
     assert editor.buttonSymbols() == QAbstractSpinBox.NoButtons  # 화살표 없이 직접 타이핑
     assert (editor.minimum(), editor.maximum()) == (0, 120)
     assert editor.suffix() == "초"
+
+
+@pytest.mark.parametrize(('offset', 'start'), [(-5, 55), (0, 60), (5, 65)])
+def test_start_offset_table_editor_updates_clip(qtbot, make_video, make_clip, offset, start):
+    from PySide6.QtWidgets import QWidget
+    from stampcut.gui.clip_table import SecondsDelegate
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    settings = Settings()
+    model = ClipTableModel(settings)
+    clip = make_clip(make_video(), t=60)
+    model.set_clips([clip])
+    index = model.index(0, COL_PRE)
+    delegate = SecondsDelegate(parent)
+    editor = delegate.createEditor(parent, None, index)
+    delegate.setEditorData(editor, index)
+    assert editor.value() == -3
+    editor.setValue(offset)
+    delegate.setModelData(editor, model, index)
+    assert clip.start(settings) == start
+    assert model.data(index) == offset
+    assert clip.end(settings) == 75

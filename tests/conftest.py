@@ -1,8 +1,19 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from stampcut.core.models import Clip, VideoInfo
+
+
+@pytest.fixture(autouse=True)
+def isolated_app_data(tmp_path, monkeypatch):
+    """Keep settings, cache, previews, and logs inside each test's temporary data."""
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
 
 @pytest.fixture

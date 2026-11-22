@@ -98,6 +98,7 @@ def extract_mentions(video: VideoInfo, comment: RawComment) -> list[Mention]:
                     author=comment.author,
                     like_count=comment.like_count,
                     is_reply=comment.is_reply,
+                    comment_text=comment.text,
                 )
             )
     return out

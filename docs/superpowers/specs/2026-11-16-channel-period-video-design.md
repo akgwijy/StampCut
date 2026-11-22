@@ -1,0 +1,15 @@
+# Channel-period selection and normal-video mode
+
+Approved request: extend StampCut, rather than create a separate app. Keep the existing Shorts workflow and add normal1920x1080 video output. Select a channel and inclusive start/end dates, enumerate all accessible matching videos, confirm the target list (all selected by default), collect all published comments and replies regardless of comment date, then use the existing timestamp clustering, length selection, clip editing, per-clip caption style, preview, BGM and export.
+
+Dates mean video publication dates in Asia/Seoul. The interval is start00:00 inclusive to day-after-end00:00 exclusive. Enumeration must not stop at the existing200-video batch cap or assume publication dates are monotonic in upload order. Dedupe, sort oldest publication first, reindex, exclude videos with no comments; skipped unavailable videos must not abort other valid results. Cancellation/progress must work between API requests. No YouTube-key or user network request is needed for automated verification.
+
+Output modes: strings shorts and video. Existing1080x1920 canvas, square1080 atY420 and crop math remain the Shorts defaults. Video uses1920x1080 with full rectangular video frame at0,0, aspect-preserving contain at zoom1, padding when needed, then user zoom/pan. Title/caption overlay the frame with initial centersX960, titleY100, caption topY900. Full previews scale to960x540. Existing font defaults, colors, maximum-duration setting and audio behavior carry across; frame-specific title/caption placement, styling, duration setting, per-clip caption overrides and zoom/pan are stored separately by mode and restored on switching.
+
+Project save/load adds source_kind, source_channel, source_start, source_end and output_mode plus clip mode_settings, while retaining additive v1/v2 compatibility and defaults for older projects. Resolved URLs are saved; restoring an old project restores Shorts. Changing channel/date invalidates any previous confirmed target selection. Invalid dates or empty selection cannot start analysis.
+
+UI: output selector in existing toolbar; source selector URL/channel-period in the existing input panel. Channel fields replace the URL entry area. Query videos in a worker and confirm them in a checkbox list. Mode/source controls lock during work; mode changes invalidate old full-preview files. Verification uses synthetic media and temporary projects/config files.
+
+Implementation choices: overlay text in normal videos (same editable font/color/position functionality); preserve source aspect by default; keep API keys, output directory and BGM preferences shared. No new dependencies, downloads, publishing, resets or deletion of user work. Work in the current feature branch so prior uncommitted authorized app changes remain usable; no commits that sweep those earlier changes.
+
+Subsequent authorization (2026-11-16): the user explicitly requested committing the completed work and pushing it to GitHub, including the earlier authorized start-offset and text-style changes preserved in this checkout. This supersedes the original no-commit constraint.

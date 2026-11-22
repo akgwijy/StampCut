@@ -23,6 +23,8 @@ def overall_percent(stage: str, done: int, total: int) -> int:
 
 class StatusPanel(QWidget):
     render_requested = Signal()
+    release_requested = Signal(object)
+    cancel_requested = Signal()
     output_dir_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -38,6 +40,9 @@ class StatusPanel(QWidget):
         self.render_btn = QPushButton("하이라이트 만들기")
         self.render_btn.setEnabled(False)
         self.render_btn.clicked.connect(self.render_requested)
+        self.cancel_btn = QPushButton("작업 취소")
+        self.cancel_btn.clicked.connect(self.cancel_requested)
+        self.cancel_btn.hide()
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.message = QLabel("")
@@ -47,6 +52,9 @@ class StatusPanel(QWidget):
         self.play_btn = QPushButton("재생")
         self.play_btn.clicked.connect(self._play)
         self.play_btn.hide()
+        self.release_btn = QPushButton("릴리즈")
+        self.release_btn.clicked.connect(lambda: self.release_requested.emit(self._result) if self._result is not None else None)
+        self.release_btn.hide()
 
         top = QHBoxLayout()
         top.addWidget(self.summary)
@@ -56,8 +64,10 @@ class StatusPanel(QWidget):
         bottom = QHBoxLayout()
         bottom.addWidget(self.progress, 1)
         bottom.addWidget(self.message, 2)
+        bottom.addWidget(self.cancel_btn)
         bottom.addWidget(self.open_folder_btn)
         bottom.addWidget(self.play_btn)
+        bottom.addWidget(self.release_btn)
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(bottom)
@@ -82,11 +92,14 @@ class StatusPanel(QWidget):
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
+        self.cancel_btn.setVisible(busy)
+        self.cancel_btn.setEnabled(busy)
         self.render_btn.setEnabled(self._clip_count > 0 and not busy)
         if busy:
             self._result = None
             self.open_folder_btn.hide()
             self.play_btn.hide()
+            self.release_btn.hide()
             self.progress.setValue(0)
 
     def set_done(self, path: Path) -> None:
@@ -95,6 +108,10 @@ class StatusPanel(QWidget):
         self.message.setText(f"완료: {path.name}")
         self.open_folder_btn.show()
         self.play_btn.show()
+        self.release_btn.show()
+
+    def result_path(self) -> Path | None:
+        return self._result
 
     def has_result(self) -> bool:
         return self._result is not None
@@ -105,6 +122,7 @@ class StatusPanel(QWidget):
         self.message.setText(message)
         self.open_folder_btn.hide()
         self.play_btn.hide()
+        self.release_btn.hide()
 
     def _open_folder(self) -> None:
         if self._result:

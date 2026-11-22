@@ -1,4 +1,4 @@
-"""출력 레이아웃 상수, 정방형 기하, ffmpeg 명령 생성."""
+"""Output layouts, frame geometry, and FFmpeg command generation."""
 from __future__ import annotations
 
 import re
@@ -6,25 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from stampcut.core.ffmpeg import FfmpegPaths, ProbeInfo
+from stampcut.core.layouts import layout_for
 from stampcut.core.models import AudioMix, Clip, Settings
+from stampcut.core.output_modes import normalize_output_settings
+from stampcut.core.settings import resolve_font
 from stampcut.core.textwrap_kr import wrap
 from stampcut.core.timestamps import format_time
 
-LAYOUT: dict = {
-    "canvas_w": 1080,
-    "canvas_h": 1920,
-    "square": 1080,
-    "square_y": 420,
-    "title_font": 64,
-    "time_font": 36,
-    "time_color": "#FFD60A",
-    "caption_font": 60,
-    "caption_border": 4,
-    "line_spacing": 0,
-    "max_text_width": 960,
-    "max_lines": 2,
-    "fps": 30,
-}
+LAYOUT: dict = layout_for("shorts")
+FONT_SIZE_MIN = 8
+FONT_SIZE_MAX = 240
 ZOOM_MIN = 0.5
 ZOOM_MAX = 3.0
 TIME_GAP = 42  # 시간 표시는 자막 상단에서 이만큼 위
@@ -32,13 +23,13 @@ TIME_GAP = 42  # 시간 표시는 자막 상단에서 이만큼 위
 
 @dataclass(frozen=True)
 class RenderProfile:
-    scale: float = 1.0  # 캔버스·정방형·폰트·Y좌표·간격 배율
+    scale: float = 1.0  # Canvas, frame, fonts, coordinates, and spacing scale together
     preset: str = "medium"
     crf: int = 18
 
 
 FINAL_PROFILE = RenderProfile()
-PREVIEW_PROFILE = RenderProfile(scale=0.5, preset="ultrafast", crf=28)  # 540x960 전체 미리보기용
+PREVIEW_PROFILE = RenderProfile(scale=0.5, preset="ultrafast", crf=28)  # Half-resolution full preview
 
 
 @dataclass(frozen=True)
@@ -76,6 +67,33 @@ def compute_square_geometry(width: int, height: int, zoom: float, pan_x: float, 
     return SquareGeometry(sw, sh, pad_w, pad_h, pad_x, pad_y, crop_x, crop_y)
 
 
+def compute_frame_geometry(
+    width: int, height: int, zoom: float, pan_x: float, pan_y: float,
+    frame_w: int, frame_h: int, contain: bool = False,
+) -> SquareGeometry:
+    """Scale, pad, and crop into an even rectangular frame.
+
+    Contain fits the complete source at zoom one. The default keeps the
+    legacy height-first sizing, with offsets aligned for chroma subsampling.
+    """
+    frame_w, frame_h = max(2, _even(frame_w)), max(2, _even(frame_h))
+    zoom = _clamp(zoom, ZOOM_MIN, ZOOM_MAX)
+    pan_x = _clamp(pan_x, 0.0, 1.0)
+    pan_y = _clamp(pan_y, 0.0, 1.0)
+    if contain:
+        scale = min(frame_w / width, frame_h / height) * zoom
+        sw, sh = max(2, _even(width * scale)), max(2, _even(height * scale))
+    else:
+        sh = max(2, _even(frame_h * zoom))
+        sw = max(2, _even(width * sh / height))
+    pad_w, pad_h = max(sw, frame_w), max(sh, frame_h)
+    pad_x = _even((pad_w - sw) * pan_x)
+    pad_y = _even((pad_h - sh) * pan_y)
+    crop_x = _even((pad_w - frame_w) * pan_x)
+    crop_y = _even((pad_h - frame_h) * pan_y)
+    return SquareGeometry(sw, sh, pad_w, pad_h, pad_x, pad_y, crop_x, crop_y)
+
+
 _BAD_FILENAME = re.compile(r'[\\/:*?"<>|]')
 
 
@@ -104,7 +122,7 @@ def ff_color(hex_color: str) -> str:
 
 
 def _write_text(path: Path, text: str) -> Path:
-    path.write_text(text, "utf-8")
+    path.write_text(text, "utf-8", newline="\n")
     return path
 
 
@@ -136,17 +154,28 @@ def build_clip_command(
     source: Path | None = None,
     in_offset: float = 0.0,
 ) -> tuple[list[str], Path]:
-    """클립 하나를 profile.scale 배율의 9:16 중간 파일로 렌더하는 ffmpeg 명령과 출력 경로.
+    """Build a clip render command using the active output mode and profile.
 
-    source가 None이면 clip.final_path. in_offset > 0이면 입력을 그만큼 건너뛴다 (여유분이 있는 미리보기 구간 파일용).
-    기본 인자로 부르면 최종 렌더(1080x1920, medium, crf 18) 명령과 완전히 같다.
+    Source defaults to clip.final_path. An in_offset seeks within a cached
+    preview segment. Default Settings retain the legacy 1080x1920 output.
     """
-    L = LAYOUT
+    settings = clip.caption_settings(normalize_output_settings(settings))
+    L = layout_for(settings.output_mode)
     k = profile.scale
-    S, W, H, fps = _even(L["square"] * k), _even(L["canvas_w"] * k), _even(L["canvas_h"] * k), L["fps"]
-    square_y = _even(L["square_y"] * k)
-    title_font, time_font, caption_font = round(L["title_font"] * k), round(L["time_font"] * k), round(L["caption_font"] * k)
-    g = compute_square_geometry(probe.width, probe.height, clip.zoom, clip.pan_x, clip.pan_y, S)
+    W, H, fps = _even(L["canvas_w"] * k), _even(L["canvas_h"] * k), L["fps"]
+    frame_w, frame_h = _even(L["frame_w"] * k), _even(L["frame_h"] * k)
+    frame_x, frame_y = _even(L["frame_x"] * k), _even(L["frame_y"] * k)
+    title_size = int(_clamp(settings.title_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX))
+    caption_size = int(_clamp(settings.caption_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX))
+    title_font, time_font, caption_font = round(title_size * k), round(L["time_font"] * k), round(caption_size * k)
+    title_face = resolve_font(settings, "title", font_path)
+    caption_face = resolve_font(settings, "caption", font_path)
+    title_x = round(_clamp(settings.title_x, 0, L["canvas_w"]) * k)
+    caption_x = round(_clamp(settings.caption_x, 0, L["canvas_w"]) * k)
+    if settings.output_mode == "video":
+        g = compute_frame_geometry(probe.width, probe.height, clip.zoom, clip.pan_x, clip.pan_y, frame_w, frame_h, contain=True)
+    else:
+        g = compute_square_geometry(probe.width, probe.height, clip.zoom, clip.pan_x, clip.pan_y, frame_w)
     title_y = round(_clamp(settings.title_y, 0, L["canvas_h"]) * k)
     caption_y = round(_clamp(settings.caption_y, 0, L["canvas_h"]) * k)
     time_gap = round(TIME_GAP * k)
@@ -155,24 +184,24 @@ def build_clip_command(
     stem = workdir / f"clip_{index:03d}"
     out = stem.with_suffix(".mp4")
     # 줄바꿈은 배율 적용 전 값으로 계산해 최종 출력과 같은 자리에서 끊는다
-    title_txt = _write_text(workdir / f"{stem.name}_title.txt", wrap(title, L["title_font"], L["max_text_width"], L["max_lines"]))
+    title_txt = _write_text(workdir / f"{stem.name}_title.txt", wrap(title, title_size, L["max_text_width"], L["max_lines"]))
     time_txt = _write_text(workdir / f"{stem.name}_time.txt", format_time(clip.t))
-    caption_txt = _write_text(workdir / f"{stem.name}_caption.txt", wrap(clip.caption, L["caption_font"], L["max_text_width"], L["max_lines"]))
+    caption_txt = _write_text(workdir / f"{stem.name}_caption.txt", wrap(clip.caption, caption_size, L["max_text_width"], L["max_lines"]))
 
     filters = [
-        f"[0:v]scale={g.sw}:{g.sh},pad={g.pad_w}:{g.pad_h}:{g.pad_x}:{g.pad_y}:color={bg},crop={S}:{S}:{g.crop_x}:{g.crop_y}[sq]",
+        f"[0:v]scale={g.sw}:{g.sh},pad={g.pad_w}:{g.pad_h}:{g.pad_x}:{g.pad_y}:color={bg},crop={frame_w}:{frame_h}:{g.crop_x}:{g.crop_y}[sq]",
         f"color=c={bg}:s={W}x{H}:r={fps}:d={dur}[bg]",
-        f"[bg][sq]overlay=0:{square_y}[c0]",
+        f"[bg][sq]overlay={frame_x}:{frame_y}[c0]",
     ]
     last = "c0"
     if title.strip():
-        filters.append(_drawtext(last, "c1", title_txt, font_path, title_font, ff_color(settings.title_color), "(w-text_w)/2", f"{title_y}-text_h/2", line_spacing=L["line_spacing"]))
+        filters.append(_drawtext(last, "c1", title_txt, title_face, title_font, ff_color(settings.title_color), f"{title_x}-text_w/2", f"{title_y}-text_h/2", line_spacing=L["line_spacing"]))
         last = "c1"
     if settings.show_time_in_caption:
-        filters.append(_drawtext(last, "c2", time_txt, font_path, time_font, ff_color(L["time_color"]), "(w-text_w)/2", str(caption_y - time_gap)))
+        filters.append(_drawtext(last, "c2", time_txt, caption_face, time_font, ff_color(L["time_color"]), f"{caption_x}-text_w/2", str(caption_y - time_gap)))
         last = "c2"
     if clip.caption.strip():
-        filters.append(_drawtext(last, "c3", caption_txt, font_path, caption_font, ff_color(settings.caption_color), "(w-text_w)/2", str(caption_y), border=max(1, round(L["caption_border"] * k)), line_spacing=L["line_spacing"]))
+        filters.append(_drawtext(last, "c3", caption_txt, caption_face, caption_font, ff_color(settings.caption_color), f"{caption_x}-text_w/2", str(caption_y), border=max(1, round(L["caption_border"] * k)), line_spacing=L["line_spacing"]))
         last = "c3"
     filters.append(f"[{last}]null[v]")
     audio_src = "0:a" if probe.has_audio else "1:a"
