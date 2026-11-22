@@ -22,6 +22,15 @@ class UrlPanel(QWidget):
         self.urls_edit.setPlaceholderText("유튜브 URL을 한 줄에 하나씩 붙여넣으세요")
         self.urls_edit.setFixedHeight(96)
         self.urls_edit.textChanged.connect(self._clear_marks)
+        self.comment_filter_edit = QLineEdit()
+        self.comment_filter_edit.setPlaceholderText("예: 원더골 (선택)")
+        self.comment_filter_edit.setToolTip("입력한 문구가 본문에 포함된 댓글과 답글만 분석합니다. 비우면 전체를 분석합니다.")
+        self.comment_filter_edit.setClearButtonEnabled(True)
+        filter_label = QLabel("댓글 필터")
+        filter_label.setBuddy(self.comment_filter_edit)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(filter_label)
+        filter_row.addWidget(self.comment_filter_edit, 1)
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("분석 후 자동으로 채워집니다 (예: 26.08.20 문성FC 하이라이트)")
         self.analyze_btn = QPushButton("댓글 분석")
@@ -36,6 +45,7 @@ class UrlPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.source_panel)
         layout.addWidget(self.urls_edit)
+        layout.addLayout(filter_row)
         layout.addWidget(QLabel("타이틀 (상단 띠)"))
         trow = QHBoxLayout()
         trow.addWidget(self.title_edit, 1)
@@ -52,6 +62,7 @@ class UrlPanel(QWidget):
 
     def restore_source(self, project):
         self.source_panel.restore(project)
+        self.comment_filter_edit.setText(project.comment_filter)
         self._sync_source()
 
     def _lines(self) -> list[str]:
@@ -105,6 +116,9 @@ class UrlPanel(QWidget):
     def title(self) -> str:
         return self.title_edit.text()
 
+    def comment_filter(self) -> str:
+        return self.comment_filter_edit.text()
+
     def set_title(self, title: str) -> None:
         self.title_edit.setText(title)
 
@@ -115,6 +129,7 @@ class UrlPanel(QWidget):
     def set_busy(self, busy: bool) -> None:
         self.source_panel.set_busy(busy)
         self.title_edit.setReadOnly(busy)
+        self.comment_filter_edit.setReadOnly(busy)
         self.analyze_btn.setEnabled(not busy)
         self.export_btn.setEnabled(not busy and self._has_export_rows)
         self.urls_edit.setReadOnly(busy)

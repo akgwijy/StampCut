@@ -57,11 +57,11 @@ class _ClipBridge(QObject):
     updated = Signal(object)
 
 
-def _analyze_job(urls, title, settings, client, progress, cancel, source=None):
+def _analyze_job(urls, title, settings, client, progress, cancel, source=None, *, comment_filter=""):
     try:
         if hasattr(client, "cancel_event"):
             client.cancel_event = cancel
-        project = pipeline.analyze(urls, title, settings, client, progress=progress, cancel=cancel)
+        project = pipeline.analyze(urls, title, settings, client, progress=progress, cancel=cancel, comment_filter=comment_filter)
         project.output_mode = settings.output_mode
         if source:
             for name in ("source_kind", "source_channel", "source_start", "source_end"):
@@ -357,7 +357,10 @@ class MainWindow(QMainWindow):
             return
         self._set_busy(True)
         self.status_panel.set_idle("댓글 분석 중")
-        w = Worker(_analyze_job, urls, self.url_panel.title(), self.settings, YouTubeClient(self.settings.api_key), source=source.metadata())
+        w = Worker(
+            _analyze_job, urls, self.url_panel.title(), self.settings, YouTubeClient(self.settings.api_key),
+            source=source.metadata(), comment_filter=self.url_panel.comment_filter(),
+        )
         w.signals.finished.connect(self._on_analyzed)
         w.signals.failed.connect(self._on_analyze_failed)
         w.signals.cancelled.connect(self._on_analysis_cancelled)
@@ -375,8 +378,9 @@ class MainWindow(QMainWindow):
         self._adopt_project(project)
         self._set_busy(False)
         if not project.clips:
-            self.status_panel.set_idle("타임스탬프가 적힌 댓글이 없습니다")
-            self._info("타임스탬프가 적힌 댓글이 없습니다.")
+            message = "필터와 일치하는 타임스탬프 댓글이 없습니다" if project.comment_filter else "타임스탬프가 적힌 댓글이 없습니다"
+            self.status_panel.set_idle(message)
+            self._info(f"{message}.")
         elif self.ffpaths is None:
             self.status_panel.set_idle(FFMPEG_MISSING)
         else:

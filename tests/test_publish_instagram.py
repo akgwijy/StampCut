@@ -399,12 +399,14 @@ def test_unified_login_requires_explicit_choice_for_multiple_accounts(store):
 ])
 def test_rupload_failure_identifies_transfer_and_meta_reason(video, store, response):
     session = Session(Response({"id": "200", "uri": UPLOAD}), response)
+    state = {}
     with pytest.raises(PublishError) as exc:
-        publish(video, store, session)
+        publish(video, store, session, state=state)
     assert "파일 전송" in str(exc.value)
     assert "ProcessingFailedError" in str(exc.value)
     assert "권한" in str(exc.value)
     assert len(session.calls) == 2
+    assert state["container_id"] == "200" and not state.get("publish_attempted")
 
 
 def test_graph_rejection_identifies_stage_and_numeric_codes_without_raw_data(video, store):
@@ -414,3 +416,33 @@ def test_graph_rejection_identifies_stage_and_numeric_codes_without_raw_data(vid
     message = str(exc.value)
     assert "세션 생성" in message and "HTTP 400" in message and "100/33" in message
     assert TOKEN not in message
+
+
+def test_rupload_failure_logs_duration_and_safe_codes_without_raw_response(video, store, caplog):
+    session = Session(Response({"id": "200", "uri": UPLOAD}), Response({
+        "debug_info": {"type": "ProcessingFailedError", "retriable": False, "message":
+            '{"error":{"code":352,"error_subcode":2207026,"message":"private-value"}}'},
+    }, 400))
+
+    with pytest.raises(PublishError):
+        publish(video, store, session)
+
+    assert "파일 전송 (HTTP 400, Meta 352/2207026, ProcessingFailedError)" in caplog.text
+    assert "elapsed=" in caplog.text and "retriable=False" in caplog.text
+    assert TOKEN not in caplog.text and "private-value" not in caplog.text and UPLOAD not in caplog.text
+
+
+def test_retry_checks_existing_container_before_transmitting_video_again(video, store):
+    first = Session(Response({"id": "200", "uri": UPLOAD}), Response({
+        "debug_info": {"type": "ProcessingFailedError", "message": "Request processing failed"},
+    }, 400))
+    state = {}
+    with pytest.raises(PublishError, match="ProcessingFailedError"):
+        publish(video, store, first, state=state)
+
+    retry = Session(Response({"status_code": "FINISHED"}), Response({"id": "300"}), Response({"permalink": LINK}))
+    post, _, _ = publish(video, store, retry, state=state)
+
+    assert retry.calls[0]["url"] == f"{BASE}/200" and retry.calls[0]["method"] == "GET"
+    assert not any("body" in call for call in retry.calls)
+    assert post.url == LINK

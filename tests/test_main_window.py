@@ -30,7 +30,7 @@ def test_analyze_fills_table_and_preview(qtbot, monkeypatch, make_video, make_cl
     v = make_video()
     clip = make_clip(v, 758, caption="원더골")
     project = Project([v.url], "26.08.20 문성FC 하이라이트", [v], [clip])
-    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel, *, comment_filter: project)
     monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: None)
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
@@ -280,7 +280,7 @@ def test_missing_ffmpeg_hints_and_skips_previews(qtbot, monkeypatch, make_video,
     fetched = []
     monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: fetched.append(1))
     project, _ = _project_with_clip(make_video, make_clip)
-    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel, *, comment_filter: project)
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)
     assert "ffmpeg" in w.status_panel.message.text()
@@ -298,7 +298,7 @@ def test_analyze_reports_skipped_videos(qtbot, monkeypatch, make_video, make_cli
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: infos.append(a[2]))
     project, _ = _project_with_clip(make_video, make_clip)
     project.warnings = ["영상을 찾을 수 없어 건너뜀: https://youtu.be/BBBBBBBBBBB"]
-    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel: project)
+    monkeypatch.setattr(main_window.pipeline, "analyze", lambda urls, title, s, client, progress, cancel, *, comment_filter: project)
     monkeypatch.setattr(main_window.pipeline, "fetch_previews", lambda *a, **k: None)
     w = MainWindow(Settings(api_key="TEST"))
     qtbot.addWidget(w)

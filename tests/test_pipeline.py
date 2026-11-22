@@ -57,6 +57,26 @@ def test_analyze_builds_project_and_default_title(make_video):
     assert calls[0][0] == "analyze" and calls[-1][1] == calls[-1][2] == 2
 
 
+@pytest.mark.parametrize(("query", "wanted"), [
+    ("  MVP 골  ", {"top", "reply"}),
+    ("  ", {"top", "reply", "author-only", "other-reply"}),
+    ("없는 문구", set()),
+])
+def test_analyze_filters_comment_and_reply_bodies_before_extracting_timestamps(make_video, query, wanted):
+    video = make_video()
+    comments = [
+        comment("top", "1:00 오늘 mvp 골 장면"),
+        RawComment("reply", "3:00 답글의 MvP 골 장면", "@b", 0, True),
+        comment("author-only", "5:00 선방", author="MVP 골"),
+        RawComment("other-reply", "7:00 다른 답글", "@b", 0, True),
+    ]
+    client = FakeClient([video], {video.video_id: comments})
+
+    project = pipeline.analyze([video.url], "", Settings(), client, comment_filter=query)
+
+    assert {mention.comment_id for clip in project.clips for mention in clip.mentions} == wanted
+
+
 def test_analyze_keeps_given_title_and_cancel(make_video):
     v = make_video()
     client = FakeClient([v], {})
