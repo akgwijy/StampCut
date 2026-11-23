@@ -458,6 +458,32 @@ def test_manual_retry_replaces_rejected_transfer_only_after_checking_status(vide
     assert retry.calls[2]["url"].endswith("/201")
 
 
+def test_generic_transfer_failure_reports_zero_bytes_from_meta(video, store):
+    session = Session(Response({"id": "200", "uri": UPLOAD}), Response({"debug_info": {
+        "message": "Request processing failed", "type": "ProcessingFailedError", "retriable": False}}, 400),
+        Response({"video_status": {"uploading_phase": {"status": "error", "bytes_transferred": 0,
+                  "errors": [{"code": 1363008, "message": "OIL Error[FILE_NOT_FOUND: 6]"}]}}}))
+    with pytest.raises(PublishError, match="1363008, 수신 0바이트"):
+        publish(video, store, session)
+    assert session.calls[-1]["params"] == {"fields": "video_status"}
+
+
+def test_unified_hosted_retry_replaces_failed_direct_session(video, store):
+    account = store.get("instagram")
+    store.put("instagram", dict(account, method="unified"))
+    link = "https://media.example/full.mp4"
+    draft = ReleaseDraft(instagram_video_url=link)
+    state = {"container_id": "200", "uploaded": False}
+    session = Session(Response({"status_code": "IN_PROGRESS"}), Response({"id": "201"}),
+                      Response({"status_code": "FINISHED"}), Response({"id": "300"}),
+                      Response({"permalink": LINK}))
+    result = provider().publish_instagram(video, draft, store, state, lambda s: None, session=session)
+    assert result.url == LINK
+    assert session.calls[1]["url"] == BASE + "/100/media"
+    assert session.calls[1]["data"]["video_url"] == link
+    assert not any("body" in call for call in session.calls)
+
+
 def test_retry_checks_existing_container_before_transmitting_video_again(video, store):
     first = Session(Response({"id": "200", "uri": UPLOAD}), Response({
         "debug_info": {"type": "ProcessingFailedError", "message": "Request processing failed"},

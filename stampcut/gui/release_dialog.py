@@ -29,6 +29,14 @@ class ReleaseDialog(JobDialog):
         self._current_video_stamp=file_stamp(self._current_video_path)
         self._source_fingerprint=draft.instagram_source_fingerprint
         self._last_upload_draft=None
+        self._drive_connected = False
+        self._instagram_method = None
+        self._drive_preference = None
+        if self._current_video_path == draft.video_path.strip():
+            if "instagram_use_drive" in (settings.publish_draft or {}):
+                self._drive_preference = draft.instagram_use_drive
+            elif draft.instagram_video_url:
+                self._drive_preference = False
         if (self._current_video_path!=draft.video_path.strip() or self._current_video_stamp!=draft.video_stamp or not self._source_fingerprint):
             draft.instagram_video_url="";draft.instagram_prepared_path="";self._source_fingerprint=""
         self.video_edit=QLineEdit(selected_video)
@@ -54,6 +62,10 @@ class ReleaseDialog(JobDialog):
         self.kids_check=QCheckBox("아동용 콘텐츠")
         self.kids_check.setChecked(draft.made_for_kids)
         privacy=QHBoxLayout();privacy.addWidget(self.privacy_combo);privacy.addWidget(self.kids_check);privacy.addStretch()
+        self.drive_label = QLabel("릴스 영상 전송")
+        self.drive_check = QCheckBox("Google Drive 자동 업로드")
+        self.drive_help = QLabel()
+        self.drive_help.setWordWrap(True)
         self.instagram_url_label=QLabel("인스타 공개 영상 URL")
         self.instagram_url_edit=QLineEdit(draft.instagram_video_url)
         self.instagram_url_edit.setPlaceholderText("현재 영상 파일이 있는 공개 HTTPS 주소")
@@ -62,7 +74,13 @@ class ReleaseDialog(JobDialog):
         self.prepared_edit.setPlaceholderText("준비 후 이 파일을 공개 저장소에 올리세요")
         self.text_count=QLabel()
         self.saved_label=QLabel("입력한 글과 옵션은 자동 저장되어 다음에도 불러옵니다.")
-        form=QFormLayout();form.addRow("유튜브 제목",self.title_edit);form.addRow("유튜브 공개 범위",privacy);form.addRow(self.prepared_label,self.prepared_edit);form.addRow(self.instagram_url_label,self.instagram_url_edit)
+        form = QFormLayout()
+        form.addRow("유튜브 제목", self.title_edit)
+        form.addRow("유튜브 공개 범위", privacy)
+        form.addRow(self.drive_label, self.drive_check)
+        form.addRow(self.drive_help)
+        form.addRow(self.prepared_label, self.prepared_edit)
+        form.addRow(self.instagram_url_label, self.instagram_url_edit)
         hint=QLabel("YouTube Shorts: 세로/정사각형 · 3분 이내. Instagram 파일 직접 전송은 호환 영상으로 준비합니다.")
         hint.setWordWrap(True)
         self.result_table=QTableWidget(0,3)
@@ -87,6 +105,7 @@ class ReleaseDialog(JobDialog):
         layout.addWidget(QLabel("글 내용 · 유튜브 설명 / 인스타그램 캡션"));layout.addWidget(self.body_edit,1);layout.addWidget(self.text_count);layout.addWidget(self.saved_label);layout.addWidget(hint)
         layout.addWidget(QLabel("같은 영상과 글로 완료한 업로드는 재시도해도 건너뜁니다."));layout.addWidget(self.result_table);layout.addWidget(self.message);layout.addWidget(self.progress);layout.addLayout(buttons)
         self._draft_timer=QTimer(self);self._draft_timer.setSingleShot(True);self._draft_timer.setInterval(350);self._draft_timer.timeout.connect(self.flush_draft)
+        self.drive_check.toggled.connect(self._drive_toggled)
         self.video_edit.textChanged.connect(self._video_changed)
         self.title_edit.textChanged.connect(self._changed)
         self.instagram_url_edit.textChanged.connect(self._url_changed)
@@ -95,11 +114,27 @@ class ReleaseDialog(JobDialog):
         self._refresh_accounts();self._update_count()
 
     def draft(self):
-        return ReleaseDraft(title=self.title_edit.text(),body=self.body_edit.toPlainText(),youtube=self.youtube_check.isChecked(),instagram=self.instagram_check.isChecked(),privacy=self.privacy_combo.currentData(),made_for_kids=self.kids_check.isChecked(),video_path=self.video_edit.text().strip(),instagram_video_url=self.instagram_url_edit.text().strip(),instagram_prepared_path=self.prepared_edit.text(),instagram_source_fingerprint=self._source_fingerprint,video_stamp=self._current_video_stamp)
+        use_drive = self.drive_check.isChecked()
+        return ReleaseDraft(
+            title=self.title_edit.text(),
+            body=self.body_edit.toPlainText(),
+            youtube=self.youtube_check.isChecked(),
+            instagram=self.instagram_check.isChecked(),
+            privacy=self.privacy_combo.currentData(),
+            made_for_kids=self.kids_check.isChecked(),
+            video_path=self.video_edit.text().strip(),
+            instagram_use_drive=use_drive,
+            instagram_video_url="" if use_drive else self.instagram_url_edit.text().strip(),
+            instagram_prepared_path=self.prepared_edit.text(),
+            instagram_source_fingerprint=self._source_fingerprint,
+            video_stamp=self._current_video_stamp,
+        )
 
     def _video_changed(self,*args):
         selected=self.video_edit.text().strip()
         if selected!=self._current_video_path or file_stamp(selected)!=self._current_video_stamp:
+            self._drive_preference = None
+            self.drive_check.setChecked(self._drive_connected)
             self._current_video_path=selected
             self._current_video_stamp=file_stamp(selected)
             self._source_fingerprint="";self._last_upload_draft=None
@@ -133,6 +168,9 @@ class ReleaseDialog(JobDialog):
         # Persist a video-specific URL only after its source hash is known.
         if not draft.instagram_source_fingerprint:draft.instagram_video_url=""
         self.settings.publish_draft=draft.to_dict()
+        if not self._drive_connected and self._drive_preference is None:
+            # A disabled checkbox records no choice for the next connection.
+            self.settings.publish_draft.pop("instagram_use_drive", None)
         try:
             settings_mod.save(self.settings)
             self.saved_label.setText("입력 내용 저장됨 · 다음에도 같은 글을 불러옵니다.")
@@ -155,16 +193,45 @@ class ReleaseDialog(JobDialog):
             self.video_edit.setText(value)
             self._video_changed()
 
+    def _drive_toggled(self, checked):
+        self._drive_preference = checked
+        self._changed()
+
     def _refresh_url_visibility(self):
-        try:visible=self.instagram_check.isChecked() and self.store.get("instagram").get("method")=="url"
-        except PublishError:visible=False
+        method = self._instagram_method
+        show_instagram = self.instagram_check.isChecked()
+        use_drive = self.drive_check.isChecked()
+        self.drive_check.setVisible(show_instagram)
+        self.drive_label.setVisible(show_instagram)
+        self.drive_check.setEnabled(not self.is_busy and (self._drive_connected or use_drive))
+        self.drive_help.setVisible(show_instagram and (use_drive or not self._drive_connected))
+        if use_drive:
+            text = "릴스용 파일을 Drive에 올리고 ‘링크가 있는 모든 사용자’에게 임시로 보기 권한을 부여합니다. Instagram 처리가 끝나면 이 권한을 해제합니다."
+            if not self._drive_connected:
+                text = "계정 연결 / 설정에서 Google Drive를 다시 연결하세요. " + text
+        else:
+            text = "자동 업로드를 사용하려면 계정 연결 / 설정에서 Google Drive를 연결하세요."
+        self.drive_help.setText(text)
+        visible = show_instagram and not use_drive and method in ("url", "resumable", "unified")
+        self.instagram_url_label.setText("인스타 영상 URL" if method == "url" else "인스타 영상 URL (선택)")
+        self.instagram_url_edit.setPlaceholderText("Meta가 내려받을 MP4의 HTTPS 주소" if method == "url" else "비우면 파일 직접 전송 · 실패 시 호환 파일의 HTTPS 주소 입력")
         self.instagram_url_label.setVisible(visible);self.instagram_url_edit.setVisible(visible);self.prepare_btn.setVisible(visible);self.prepared_label.setVisible(visible);self.prepared_edit.setVisible(visible)
 
     def _refresh_accounts(self):
         try:
             youtube=self.store.get("youtube");instagram=self.store.get("instagram")
+            self._instagram_method = instagram.get("method")
+            connected = bool(self.store.get("drive").get("refresh_token"))
+            if connected and self._drive_preference is None and not self.instagram_url_edit.text().strip():
+                self.drive_check.setChecked(True)
+            elif self._drive_preference is not None:
+                self.drive_check.setChecked(self._drive_preference)
+            self._drive_connected = connected
             self.account_summary.setText("YouTube: "+str(youtube.get("channel_title") or "연결 안 됨")+"    Instagram: "+str(instagram.get("username") or "연결 안 됨"))
-        except PublishError as error:self.account_summary.setText(str(error))
+        except PublishError as error:
+            self._instagram_method = None
+            self._drive_connected = False
+            self.account_summary.setText(str(error))
         self._refresh_url_visibility()
 
     def _open_accounts(self):
@@ -205,6 +272,8 @@ class ReleaseDialog(JobDialog):
             video=Path(draft.video_path)
             if not draft.video_path or not video.is_file():raise PublishError("업로드할 완성 영상을 선택하세요.")
             if not draft.youtube and not draft.instagram:raise PublishError("업로드할 플랫폼을 하나 이상 선택하세요.")
+            if draft.instagram and draft.instagram_use_drive and not self._drive_connected:
+                raise PublishError("계정 연결 / 설정에서 Google Drive를 다시 연결하세요.")
             for target,selected in (("youtube",draft.youtube),("instagram",draft.instagram)):
                 if selected:draft.validate_for(target)
         except PublishError as error:
@@ -215,6 +284,7 @@ class ReleaseDialog(JobDialog):
 
     def set_job_busy(self,busy):
         for widget in (self.video_edit,self.browse_btn,self.prepare_btn,self.youtube_check,self.instagram_check,self.accounts_btn,self.title_edit,self.body_edit,self.privacy_combo,self.kids_check,self.instagram_url_edit,self.upload_btn):widget.setEnabled(not busy)
+        self._refresh_url_visibility()
         self.cancel_btn.setEnabled(busy)
 
     def _show_results(self,result):
@@ -235,7 +305,14 @@ class ReleaseDialog(JobDialog):
         self.message.setText("작업 취소됨 · 이미 완료된 업로드는 유지됩니다." if result.cancelled else f"업로드 완료 {successes}개 / 대상 {len(result.outcomes)}개")
         incomplete=result.cancelled or any(outcome.status!="success" for outcome in result.outcomes)
         self.upload_btn.setText("미완료 대상 재시도" if incomplete else "업로드 완료")
-        self.upload_btn.setEnabled(incomplete)
+        cleanup_pending = any(
+            outcome.platform == "instagram" and outcome.status == "success"
+            and "Drive 공유 해제" in outcome.error and "로컬 완료 기록" not in outcome.error
+            for outcome in result.outcomes
+        )
+        if cleanup_pending and not incomplete:
+            self.upload_btn.setText("Drive 공유 해제 재시도")
+        self.upload_btn.setEnabled(incomplete or cleanup_pending)
 
     def _open_link(self,row,column):
         item=self.result_table.item(row,2)

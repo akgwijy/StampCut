@@ -16,6 +16,92 @@ def setup(tmp_path,providers,**kwargs):
     return service,video,store
 
 
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_drive_hosts_prepared_file_and_revokes_link_even_on_failure(tmp_path, monkeypatch, first_fails):
+    from stampcut.core.publishing import drive
+    events = []
+    link = "https://drive.google.com/uc?id=demo"
+    def share(upload, store, state, save_state, **kwargs):
+        events.append(("share", upload))
+        state["drive_permission_id"] = "reader"
+        save_state(state)
+        return link
+    def revoke(store, state, save_state):
+        events.append(("revoke", state.pop("drive_permission_id")))
+        save_state(state)
+    def provider(upload, draft, store, state, save_state, **kwargs):
+        events.append(("instagram", draft.instagram_video_url))
+        if first_fails:
+            raise PublishError("transfer failed")
+        return PublishedPost("instagram", "300", "https://www.instagram.com/reel/test/")
+    monkeypatch.setattr(drive, "ensure_shared_video", share)
+    monkeypatch.setattr(drive, "revoke_video_share", revoke)
+    service, video, store = setup(tmp_path, {"instagram": provider})
+    store.put("drive", {"refresh_token": "demo"})
+    prepared = tmp_path / "prepared.mp4"
+    prepared.write_bytes(b"prepared")
+    service.preparer = lambda *args, **kwargs: prepared
+    draft = ReleaseDraft(youtube=False, instagram_use_drive=True)
+    result = service.publish(video, draft)
+    assert events == [("share", prepared), ("instagram", link), ("revoke", "reader")]
+    assert result.outcomes[0].status == ("error" if first_fails else "success")
+    assert not draft.instagram_video_url
+    if not first_fails:
+        assert service.publish(video, draft).outcomes[0].post.already_uploaded
+        assert len(events) == 3
+
+
+def test_ready_drive_container_resumes_without_resharing(tmp_path, monkeypatch):
+    from stampcut.core.publishing import drive
+    shares = []
+    link = "https://drive.google.com/uc?id=demo"
+    def share(*args, **kwargs):
+        shares.append(1)
+        return link
+    def provider(upload, draft, store, state, save_state, **kwargs):
+        assert draft.instagram_video_url == link
+        if not state.get("container_id"):
+            state.update(status="ready", container_id="123", video_url=link)
+            save_state(state)
+            raise Cancelled()
+        return PublishedPost("instagram", "300", "https://www.instagram.com/reel/test/")
+    monkeypatch.setattr(drive, "ensure_shared_video", share)
+    service, video, store = setup(tmp_path, {"instagram": provider})
+    store.put("drive", {"refresh_token": "demo"})
+    draft = ReleaseDraft(youtube=False, instagram_use_drive=True)
+    assert service.publish(video, draft).cancelled
+    assert service.publish(video, draft).outcomes[0].status == "success"
+    assert shares == [1]
+
+
+def test_drive_cleanup_retry_does_not_publish_again(tmp_path, monkeypatch):
+    from stampcut.core.publishing import drive
+    calls = []
+    def share(upload, store, state, save_state, **kwargs):
+        state["drive_permission_id"] = "reader"
+        save_state(state)
+        return "https://drive.google.com/uc?id=demo"
+    def revoke(store, state, save_state):
+        calls.append("revoke")
+        if calls.count("revoke") == 1:
+            raise PublishError("연결 오류")
+        del state["drive_permission_id"]
+        save_state(state)
+    def provider(*args, **kwargs):
+        calls.append("publish")
+        return PublishedPost("instagram", "300", "https://www.instagram.com/reel/test/")
+    monkeypatch.setattr(drive, "ensure_shared_video", share)
+    monkeypatch.setattr(drive, "revoke_video_share", revoke)
+    service, video, store = setup(tmp_path, {"instagram": provider})
+    store.put("drive", {"refresh_token": "demo"})
+    draft = ReleaseDraft(youtube=False, instagram_use_drive=True)
+    first = service.publish(video, draft).outcomes[0]
+    assert first.status == "success" and "Drive 공유 해제 실패" in first.error
+    second = service.publish(video, draft).outcomes[0]
+    assert second.post.already_uploaded and not second.error
+    assert calls == ["publish", "revoke", "revoke"]
+
+
 def test_partial_success_retry_does_not_duplicate_completed_target(tmp_path):
     calls=[];fail=[True]
     def youtube(video,draft,store,state,save_state,**kwargs):

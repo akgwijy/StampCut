@@ -16,6 +16,15 @@ StampCut에서 완성 영상을 YouTube Shorts와 Instagram Reels에 게시하�
 
 공식 문서: [데스크톱 OAuth](https://developers.google.com/identity/protocols/oauth2/native-app), [업로드 API](https://developers.google.com/youtube/data/reference/rest/v3/videos/insert), [재개 가능한 업로드](https://developers.google.com/youtube/v3/guides/using_resumable_upload_protocol), [3분 Shorts](https://support.google.com/youtube/answer/15424877?hl=ko).
 
+## Google Drive 자동 업로드
+
+1. YouTube 연결에 사용한 Google Cloud 프로젝트에서 **Google Drive API**를 사용 설정합니다. 데스크톱 OAuth 클라이언트는 함께 사용할 수 있습니다. [Drive API 사용 설정](https://console.cloud.google.com/apis/library/drive.googleapis.com)
+2. **릴리즈 → 계정 연결 / 설정…**에서 Google Drive를 연결하고 브라우저에서 계정을 선택합니다. StampCut은 앱이 만든 파일을 관리하는 `drive.file` 권한을 요청합니다. [Drive 권한 안내](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
+3. 게시할 영상을 선택하고 **Instagram Reels → Google Drive 자동 업로드**를 선택합니다. 앱이 원본과 같은 해상도·화면 비율의 릴스용 MP4를 Drive에 업로드합니다. 파일을 따로 올리거나 URL을 복사할 필요가 없습니다.
+4. Meta가 영상을 가져올 동안 해당 파일에만 **링크가 있는 모든 사용자 · 뷰어** 권한이 적용됩니다. 작업이 끝나거나 취소되면 앱이 만든 공유 권한을 회수하고 Drive 파일은 보관합니다. 공유 해제 실패가 표시되면 같은 릴리즈에서 다시 시도하거나 Drive에서 해당 파일의 공유를 **제한됨**으로 변경하세요.
+
+조직 정책이 외부 링크 공유를 제한하거나 Google이 다운로드 확인 화면만 제공하면 앱이 이를 알리고 게시를 중단합니다.
+
 ## Instagram 연결
 
 **비즈니스와 크리에이터 계정 모두 가능합니다.** 조기축구팀의 공식 계정이라면 비즈니스, 카테고리는 스포츠 팀을 권합니다. 일반 개인 계정은 API 게시 대상이 아닙니다. 계정 유형 변경만으로 API 연결까지 완료되는 것은 아닙니다. Meta 개발자 앱에서 게시 권한과 액세스 토큰을 준비해야 합니다.

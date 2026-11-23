@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from contextlib import ExitStack
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from stampcut.core.ffmpeg import Cancelled
 from .credentials import CredentialStore
@@ -55,6 +56,21 @@ def _ambiguous(state):
     return state.get("final_attempted") or state.get("publish_attempted") or state.get("status") in ("uncertain", "unknown")
 
 
+def _close_drive_share(store, state, save_state, result):
+    if not (state.get("drive_permission_id") or state.get("drive_share_pending")):
+        return
+    from .drive import revoke_video_share
+    try:
+        revoke_video_share(store, state, save_state)
+    except PublishError as error:
+        warning = f"Google Drive 공유 해제 실패 · {error}. 다시 시도하거나 Drive에서 파일의 링크 공유를 해제하세요."
+        if result.outcomes and result.outcomes[-1].platform == "instagram":
+            outcome = result.outcomes[-1]
+            outcome.error = "\n".join(filter(None, (outcome.error, warning)))
+        else:
+            result.outcomes.append(PublishOutcome("instagram", "error", error=warning))
+
+
 class ReleaseService:
     def __init__(self, store=None, paths=None, providers=None, inspector=None, preparer=None):
         self.store = store if store is not None else CredentialStore()
@@ -87,7 +103,10 @@ class ReleaseService:
             if not account_id or not (account.get("access_token") or (platform == "youtube" and account.get("refresh_token"))):
                 raise PublishError(("유튜브" if platform == "youtube" else "인스타그램") + " 계정을 먼저 연결하세요.")
             accounts[platform] = account
-        url_mode = "instagram" in targets and accounts["instagram"].get("method") == "url"
+        drive_mode = "instagram" in targets and draft.instagram_use_drive
+        if drive_mode and not self.store.get("drive").get("refresh_token"):
+            raise PublishError("계정 연결 / 설정에서 Google Drive를 먼저 연결하세요.")
+        url_mode = "instagram" in targets and not drive_mode and (accounts["instagram"].get("method") == "url" or bool(draft.instagram_video_url))
         if url_mode:
             from .instagram import validate_video_url
             validate_video_url(draft.instagram_video_url)
@@ -103,7 +122,10 @@ class ReleaseService:
                 target_info = self.inspector(instagram_file, self.paths) if platform == "instagram" and instagram_file != video else info
                 if platform == "instagram" and url_mode and not target_info.same_geometry(info):
                     raise PublishError("릴스 호환 파일의 해상도 또는 화면 비율이 원본과 다릅니다. 호환 파일을 다시 준비하세요.")
-                validate_media(target_info, platform, accounts[platform].get("method", "resumable"))
+                method = accounts[platform].get("method", "resumable")
+                if platform == "instagram":
+                    method = "resumable" if drive_mode else "url" if url_mode else method
+                validate_media(target_info, platform, method)
             fingerprint = file_fingerprint(video, cancel)
             if url_mode:
                 if (draft.instagram_source_fingerprint and draft.instagram_source_fingerprint != fingerprint) or (draft.video_stamp and draft.video_stamp != file_stamp(video)):
@@ -116,7 +138,7 @@ class ReleaseService:
                 metadata = {"title": draft.title, "body": draft.body, "privacy": draft.privacy, "made_for_kids": draft.made_for_kids} if platform == "youtube" else {"body": draft.body}
                 key = "release:" + hashlib.sha256(json.dumps([fingerprint, platform, account_id, metadata], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
                 try:
-                    with self.store.operation(key):
+                    with self.store.operation(key), ExitStack() as cleanup:
                         state = self.store.get(key)
                         saved_success = [False]
                         def save_state(updated):
@@ -126,6 +148,8 @@ class ReleaseService:
                         def target_progress(stage, done, total, message):
                             fraction = min(1, max(0, done / total)) if total else 0
                             progress("release", index * 100 + int(fraction * 100), len(targets) * 100, message)
+                        if platform == "instagram":
+                            cleanup.callback(_close_drive_share, self.store, state, save_state, result)
                         post = _confirmed(platform, state)
                         if post:
                             post.already_uploaded = True
@@ -133,8 +157,21 @@ class ReleaseService:
                             target_progress(platform, 1, 1, "이미 완료된 업로드 확인")
                             continue
                         try:
+                            publish_draft = draft
                             upload = instagram_file if platform == "instagram" and url_mode else video
-                            if platform == "instagram" and not url_mode:
+                            if platform == "instagram" and drive_mode:
+                                ready = state.get("status") == "ready" and state.get("container_id") and state.get("video_url")
+                                if ready or _ambiguous(state):
+                                    # Instagram checks this container again before publishing.
+                                    publish_draft = replace(draft, instagram_video_url=state.get("video_url", ""))
+                                else:
+                                    from .drive import ensure_shared_video
+                                    upload = self.preparer(video, self.paths, fingerprint, progress=target_progress, cancel=cancel)
+                                    link = ensure_shared_video(upload, self.store, state, save_state,
+                                                               progress=target_progress, cancel=cancel,
+                                                               display_name=f"{video.stem} · Instagram.mp4")
+                                    publish_draft = replace(draft, instagram_video_url=link)
+                            elif platform == "instagram" and not url_mode:
                                 upload = self.preparer(video, self.paths, fingerprint, progress=target_progress, cancel=cancel)
                                 if not _ambiguous(state):
                                     upload_fingerprint = file_fingerprint(upload, cancel)
@@ -143,7 +180,7 @@ class ReleaseService:
                                             state.pop(field, None)
                                     state["upload_fingerprint"] = upload_fingerprint
                             check_cancel(cancel)
-                            post = self._provider(platform)(upload, draft, self.store, state, save_state, progress=target_progress, cancel=cancel)
+                            post = self._provider(platform)(upload, publish_draft, self.store, state, save_state, progress=target_progress, cancel=cancel)
                             state.update(status="success", id=post.id, url=post.url)
                             if not saved_success[0]:
                                 save_state(state)

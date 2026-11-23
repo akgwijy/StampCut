@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
+    QTabWidget,
+    QWidget,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from stampcut.core.ffmpeg import Cancelled
-from stampcut.core.publishing.google_oauth import connect_youtube
+from stampcut.core.publishing.google_oauth import connect_drive, connect_youtube
 from stampcut.core.publishing.instagram import connect_instagram
 from stampcut.core.publishing.models import PublishError
 from stampcut.gui.release_jobs import JobDialog
@@ -35,14 +36,15 @@ class ReleaseAccountsDialog(JobDialog):
         self.store = store
         self._yt_connected = False
         self._ig_connected = False
+        self._drive_connected = False
         self._ig_api_version = "v26.0"
         self.setWindowTitle("게시 계정 연결")
-        self.resize(720, 650)
+        self.resize(680, 460)
 
         self.yt_file_edit = QLineEdit()
         self.yt_file_edit.setPlaceholderText("Google Cloud 데스크톱 앱 OAuth 클라이언트 JSON")
         self.yt_browse_btn = QPushButton("찾기…")
-        self.yt_browse_btn.clicked.connect(self._browse_youtube)
+        self.yt_browse_btn.clicked.connect(lambda: self._browse_client(self.yt_file_edit))
         file_row = QHBoxLayout()
         file_row.addWidget(self.yt_file_edit, 1)
         file_row.addWidget(self.yt_browse_btn)
@@ -55,7 +57,7 @@ class ReleaseAccountsDialog(JobDialog):
         yt_actions.addWidget(self.yt_disconnect_btn)
         yt_actions.addStretch()
         self.yt_account_label = _label()
-        yt_box = QGroupBox("YouTube")
+        yt_box = QWidget()
         yt_layout = QVBoxLayout(yt_box)
         yt_layout.addWidget(_label("Google Cloud에서 YouTube Data API v3를 사용 설정하고, 데스크톱 앱 OAuth 클라이언트 JSON을 선택하세요. 연결하면 시스템 브라우저에서 Google 계정 승인을 받습니다."))
         yt_layout.addLayout(file_row)
@@ -82,7 +84,7 @@ class ReleaseAccountsDialog(JobDialog):
         ig_actions.addWidget(self.ig_disconnect_btn)
         ig_actions.addStretch()
         self.ig_account_label = _label()
-        ig_box = QGroupBox("Instagram")
+        ig_box = QWidget()
         ig_layout = QVBoxLayout(ig_box)
         ig_form = QFormLayout()
         ig_form.addRow("업로드 방식", self.ig_method_combo)
@@ -92,6 +94,35 @@ class ReleaseAccountsDialog(JobDialog):
         ig_layout.addWidget(self.ig_method_help)
         ig_layout.addLayout(ig_actions)
         ig_layout.addWidget(self.ig_account_label)
+
+        self.drive_file_edit = QLineEdit()
+        self.drive_file_edit.setPlaceholderText("저장된 Google 클라이언트를 쓰려면 비워 두세요")
+        self.drive_browse_btn = QPushButton("찾기…")
+        self.drive_browse_btn.clicked.connect(lambda: self._browse_client(self.drive_file_edit))
+        drive_file = QHBoxLayout()
+        drive_file.addWidget(self.drive_file_edit, 1)
+        drive_file.addWidget(self.drive_browse_btn)
+        self.drive_connect_btn = QPushButton("Google Drive 연결")
+        self.drive_connect_btn.clicked.connect(self._start_drive)
+        self.drive_disconnect_btn = QPushButton("앱에서 연결 해제")
+        self.drive_disconnect_btn.clicked.connect(self._disconnect_drive)
+        drive_actions = QHBoxLayout()
+        drive_actions.addWidget(self.drive_connect_btn)
+        drive_actions.addWidget(self.drive_disconnect_btn)
+        drive_actions.addStretch()
+        self.drive_account_label = _label()
+        drive_box = QWidget()
+        drive_layout = QVBoxLayout(drive_box)
+        drive_layout.addWidget(_label("Google Cloud에서 Google Drive API를 사용 설정하세요. 처음 연결할 때 YouTube에 저장한 OAuth 클라이언트를 사용하거나 데스크톱 앱 JSON을 선택할 수 있습니다. 브라우저에서 Drive 권한을 승인하세요."))
+        drive_layout.addLayout(drive_file)
+        drive_layout.addLayout(drive_actions)
+        drive_layout.addWidget(self.drive_account_label)
+        for account_layout in (yt_layout, ig_layout, drive_layout):
+            account_layout.addStretch()
+        tabs = QTabWidget()
+        tabs.addTab(yt_box, "YouTube")
+        tabs.addTab(ig_box, "Instagram")
+        tabs.addTab(drive_box, "Google Drive")
 
         self.message = _label("계정을 연결하면 게시 창에서 사용할 수 있습니다.")
         self.progress = QProgressBar()
@@ -106,19 +137,20 @@ class ReleaseAccountsDialog(JobDialog):
         actions.addWidget(self.cancel_btn)
         actions.addWidget(self.close_btn)
         layout = QVBoxLayout(self)
-        layout.addWidget(yt_box)
-        layout.addWidget(ig_box)
+        layout.addWidget(tabs)
         layout.addWidget(_label("연결 정보는 현재 Windows 사용자 계정으로 암호화해 이 PC에 저장합니다. 계정 연결만으로 영상이 게시되지는 않습니다."))
         layout.addWidget(self.message)
         layout.addWidget(self.progress)
         layout.addLayout(actions)
         self._controls = (self.yt_file_edit, self.yt_browse_btn, self.yt_connect_btn,
+                          self.drive_file_edit, self.drive_browse_btn, self.drive_connect_btn,
                           self.ig_id_edit, self.ig_token_edit, self.ig_method_combo, self.ig_connect_btn)
         try:
             youtube = self.store.get("youtube")
             instagram = self.store.get("instagram")
+            drive = self.store.get("drive")
         except PublishError as error:
-            youtube, instagram = {}, {}
+            youtube, instagram, drive = {}, {}, {}
             self.message.setText(str(error))
         self.yt_file_edit.setText(self._string(youtube.get("client_file")))
         self.ig_id_edit.setText(self._string(instagram.get("account_id")))
@@ -126,6 +158,7 @@ class ReleaseAccountsDialog(JobDialog):
         method_index = self.ig_method_combo.findData(instagram.get("method", "unified"))
         self.ig_method_combo.setCurrentIndex(max(0, method_index))
         self._ig_api_version = self._string(instagram.get("api_version")) or "v26.0"
+        self._show_drive(drive)
         self._show_youtube(youtube)
         self._show_instagram(instagram)
         self._update_method_help()
@@ -139,23 +172,24 @@ class ReleaseAccountsDialog(JobDialog):
         unified = self.ig_method_combo.currentData() == "unified"
         self.ig_id_edit.setPlaceholderText("팀 계정 1개만 승인했으면 비워 두세요" if unified else "프로페셔널 Instagram 계정 ID (숫자)")
         if unified:
-            text = "Meta 비즈니스 포트폴리오에서 통합 로그인으로 팀 Instagram 계정을 승인하고 발급한 토큰을 입력하세요. 영상은 PC에서 릴스로 직접 전송됩니다."
+            text = "Meta 비즈니스 포트폴리오에서 통합 로그인으로 팀 Instagram 계정을 승인하고 발급한 토큰을 입력하세요. 게시 창에서 PC 파일 직접 전송 또는 Google Drive 자동 업로드를 선택할 수 있습니다."
         elif self.ig_method_combo.currentData() == "resumable":
             text = "Facebook 페이지에 연결된 비즈니스·크리에이터 계정을 사용합니다. Meta 앱에서 Facebook Login 장기 토큰을 발급하고 Instagram 기본·콘텐츠 게시 및 연결된 페이지 읽기 권한을 부여하세요."
         else:
-            text = "Meta 앱의 Instagram Login으로 프로페셔널 계정 ID와 장기 토큰을 발급하고 Instagram 기본·콘텐츠 게시 권한을 부여하세요. 게시 시 외부에서 접근 가능한 공개 HTTPS 영상 URL이 필요합니다."
+            text = "Meta 앱의 Instagram Login으로 프로페셔널 계정 ID와 장기 토큰을 발급하고 Instagram 기본·콘텐츠 게시 권한을 부여하세요. 게시 창에서 Google Drive 자동 업로드를 선택하거나 공개 HTTPS 영상 URL을 입력하세요."
         self.ig_method_help.setText(text)
 
-    def _browse_youtube(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Google OAuth 클라이언트 JSON 선택", self.yt_file_edit.text(), "JSON (*.json)")
+    def _browse_client(self, field):
+        path, _ = QFileDialog.getOpenFileName(self, "Google OAuth 클라이언트 JSON 선택", field.text(), "JSON (*.json)")
         if path:
-            self.yt_file_edit.setText(path)
+            field.setText(path)
 
     def set_job_busy(self, busy):
         for control in self._controls:
             control.setEnabled(not busy)
         self.yt_disconnect_btn.setEnabled(not busy and self._yt_connected)
         self.ig_disconnect_btn.setEnabled(not busy and self._ig_connected)
+        self.drive_disconnect_btn.setEnabled(not busy and self._drive_connected)
         self.cancel_btn.setEnabled(busy)
         if busy:
             self.progress.setRange(0, 100)
@@ -181,6 +215,34 @@ class ReleaseAccountsDialog(JobDialog):
             raise
         except Exception:
             raise PublishError("Google 계정을 연결하지 못했습니다. JSON 파일과 계정 설정을 확인하세요.") from None
+
+    def _start_drive(self):
+        if self.is_busy:
+            return
+        client_file = self.drive_file_edit.text().strip() or None
+        self.message.setText("브라우저에서 Google Drive 연결을 승인하세요.")
+        self.run_job(connect_drive, client_file, self.store, on_finished=self._show_drive)
+
+    def _show_drive(self, result):
+        self._drive_connected = bool(result.get("refresh_token"))
+        self.drive_account_label.setText("Google Drive 연결됨" if self._drive_connected else "Google Drive 연결 안 됨")
+        self.drive_connect_btn.setText("Google Drive 다시 연결" if self._drive_connected else "Google Drive 연결")
+        self.drive_disconnect_btn.setEnabled(self._drive_connected and not self.is_busy)
+        if self._drive_connected:
+            self.message.setText("Google Drive를 연결했습니다.")
+            self.progress.setValue(100)
+
+    def _disconnect_drive(self):
+        if self.is_busy:
+            return
+        try:
+            self.store.delete("drive")
+        except PublishError as error:
+            self.message.setText(str(error))
+            return
+        self.drive_file_edit.clear()
+        self._show_drive({})
+        self.message.setText("앱에서 Google Drive 연결을 해제했습니다.")
 
     def _start_instagram(self):
         if self.is_busy:

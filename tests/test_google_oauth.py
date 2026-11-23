@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import hashlib
 import importlib
 import json
@@ -202,3 +202,125 @@ def test_missing_channel_does_not_overwrite_previously_connected_account(tmp_pat
     with pytest.raises(PublishError):
         mod.connect_youtube(client_file(tmp_path), store, session=session)
     assert store.get("youtube") == {"channel_id": "existing", "refresh_token": "old"}
+
+
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+
+
+@pytest.mark.parametrize("reuse", [True, False])
+def test_drive_connect_uses_only_drive_scope_and_separate_tokens(tmp_path, monkeypatch, reuse):
+    mod = oauth()
+    store = vault(tmp_path)
+    youtube = {"client_id": "saved-id", "client_secret": "saved-secret", "refresh_token": "youtube-only"}
+    store.put("youtube", youtube)
+    path = None if reuse else client_file(tmp_path)
+    captured = {}
+
+    def receive(make_url, state, browser, cancel):
+        redirect = "http://127.0.0.1:41234/oauth2callback"
+        captured.update(parse_qs(urlsplit(make_url(redirect)).query))
+        assert captured["state"] == [state]
+        return "code", redirect
+
+    monkeypatch.setattr(mod, "_receive_authorization", receive)
+    session = Session([Response(data={"access_token": "drive", "refresh_token": "drive-only", "scope": DRIVE_SCOPE, "expires_in": 3600}), Response(data={"user": {"permissionId": "drive-user"}})])
+    result = mod.connect_drive(path, store, session=session)
+    assert captured["scope"] == [DRIVE_SCOPE]
+    assert captured["access_type"] == ["offline"]
+    assert captured["code_challenge_method"] == ["S256"]
+    payload = session.calls[0][2]["data"]
+    assert captured["client_id"] == [payload["client_id"]]
+    assert payload["client_secret"] == ("saved-secret" if reuse else "desktop-secret")
+    assert "refresh_token" not in payload
+    assert result["scope"] == DRIVE_SCOPE
+    assert result["permission_id"] == "drive-user"
+    assert session.calls[1][1] == "https://www.googleapis.com/drive/v3/about"
+    assert session.calls[1][2]["params"]["fields"] == "user(permissionId)"
+    assert result["refresh_token"] == "drive-only"
+    assert store.get("drive") == result
+    assert mod.drive_credentials(store, session=Session()) == result
+    assert store.get("youtube") == youtube
+
+
+@pytest.mark.parametrize("reply", [
+    {"access_token": "new", "refresh_token": "new-refresh", "scope": "https://www.googleapis.com/auth/youtube.upload"},
+    {"access_token": "new", "scope": DRIVE_SCOPE},
+])
+def test_failed_drive_consent_preserves_existing_account(tmp_path, monkeypatch, reply):
+    mod = oauth()
+    store = vault(tmp_path)
+    original = {"client_id": "previous", "refresh_token": "previous-refresh"}
+    store.put("drive", original)
+    monkeypatch.setattr(mod, "_receive_authorization", lambda *args: ("code", "http://127.0.0.1:41234/oauth2callback"))
+    with pytest.raises(PublishError):
+        mod.connect_drive(client_file(tmp_path), store, session=Session([Response(data=dict(reply, expires_in=3600))]))
+    assert store.get("drive") == original
+
+
+def test_drive_refresh_rotates_its_own_token_and_rejects_downgraded_grants(tmp_path):
+    mod = oauth()
+    store = vault(tmp_path)
+    original = {"client_id": "drive-client", "permission_id": "drive-user", "scope": DRIVE_SCOPE, "refresh_token": "drive-only", "expires_at": 0}
+    store.put("drive", original)
+    with pytest.raises(PublishError):
+        mod.drive_credentials(store, session=Session([Response(data={"access_token": "invalid", "scope": "wrong", "expires_in": 3600})]))
+    assert store.get("drive") == original
+    session = Session([Response(data={"access_token": "fresh", "refresh_token": "rotated", "expires_in": 3600})])
+    result = mod.drive_credentials(store, session=session)
+    assert session.calls[0][2]["data"]["refresh_token"] == "drive-only"
+    assert result["access_token"] == "fresh"
+    assert result["refresh_token"] == "rotated"
+    assert result["scope"] == DRIVE_SCOPE
+    assert store.get("drive") == result
+
+
+def test_drive_missing_client_explains_how_to_connect(tmp_path):
+    with pytest.raises(PublishError, match="JSON"):
+        oauth().connect_drive(None, vault(tmp_path), open_browser=lambda url: pytest.fail("Missing client opened browser"))
+
+
+def test_drive_cached_consent_backfills_permission_id_without_new_consent(tmp_path, monkeypatch):
+    mod = oauth()
+    monkeypatch.setattr(mod.time, "time", lambda: 1000)
+    store = vault(tmp_path)
+    original = {"scope": DRIVE_SCOPE, "client_id": "id", "access_token": "fresh", "refresh_token": "renew", "expires_at": 4000}
+    store.put("drive", original)
+    session = Session([Response(data={"user": {"permissionId": "drive-user"}})])
+    values = mod.drive_credentials(store, session=session)
+    assert values == dict(original, permission_id="drive-user")
+    assert store.get("drive") == values
+    assert mod.drive_credentials(store, session=Session()) == values
+
+
+@pytest.mark.parametrize("details", [
+    {"errors": [{"reason": "accessNotConfigured"}]},
+    {"details": [{"reason": "SERVICE_DISABLED", "metadata": {"activationUrl": "https://evil.invalid"}}]},
+])
+def test_drive_disabled_links_to_cloud_project_and_preserves_previous_account(tmp_path, monkeypatch, details):
+    mod = oauth()
+    store = vault(tmp_path)
+    store.put("youtube", {"client_id": "123456789-test.apps.googleusercontent.com"})
+    original = {"permission_id": "previous"}
+    store.put("drive", original)
+    monkeypatch.setattr(mod, "_receive_authorization", lambda *args: ("code", "http://127.0.0.1:41234/oauth2callback"))
+    session = Session([Response(data={"access_token": "drive", "refresh_token": "drive-only", "expires_in": 3600}), Response(403, {"error": details})])
+    with pytest.raises(PublishError) as error:
+        mod.connect_drive(None, store, session=session)
+    assert "https://console.cloud.google.com/apis/library/drive.googleapis.com?project=123456789" in str(error.value)
+    assert "evil.invalid" not in str(error.value)
+    assert store.get("drive") == original
+
+
+def test_drive_can_reconnect_with_standalone_saved_client(tmp_path, monkeypatch):
+    mod = oauth()
+    store = vault(tmp_path)
+    store.put("drive", {"client_id": "drive-client", "client_secret": "saved-secret"})
+    monkeypatch.setattr(mod, "_receive_authorization", lambda *args: ("code", "http://127.0.0.1:41234/oauth2callback"))
+    session = Session([
+        Response(data={"access_token": "fresh", "refresh_token": "new-refresh", "expires_in": 3600}),
+        Response(data={"user": {"permissionId": "drive-user"}}),
+    ])
+    result = mod.connect_drive(None, store, session=session)
+    assert result["client_id"] == "drive-client"
+    assert result["permission_id"] == "drive-user"
+    assert session.calls[0][2]["data"]["client_secret"] == "saved-secret"

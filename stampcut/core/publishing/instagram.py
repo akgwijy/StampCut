@@ -27,10 +27,11 @@ _UNKNOWN = "인스타그램 게시 결과를 확인할 수 없습니다. 중복 
 
 
 class _APIError(PublishError):
-    def __init__(self, message, definitive=False, retriable=None):
+    def __init__(self, message, definitive=False, retriable=None, inspect_transfer=False):
         super().__init__(message)
         self.definitive = definitive
         self.retriable = retriable
+        self.inspect_transfer = inspect_transfer
 
 
 def _identifier(value):
@@ -127,7 +128,8 @@ def _request(session, method, url, token, *, stage="계정 확인", headers=None
             reason = _display_reason(raw_message, token)
             if reason:
                 message += f"\nMeta 상세: {reason}"
-        raise _APIError(message, definitive=definitive, retriable=retriable)
+        inspect_transfer = processing_failed and retriable is False and str(raw_message).strip().casefold() == "request processing failed"
+        raise _APIError(message, definitive=definitive, retriable=retriable, inspect_transfer=inspect_transfer)
     return payload
 
 
@@ -265,6 +267,24 @@ def _status(client, base, container, token, cancel):
     return status
 
 
+def _transfer_failure_detail(client, base, container, token):
+    try:
+        payload = _request(client, "GET", f"{base}/{container}", token,
+                           params={"fields": "video_status"}, stage="전송 실패 사유 조회")
+    except PublishError:
+        return ""
+    video_status = payload.get("video_status")
+    phase = video_status.get("uploading_phase") if isinstance(video_status, dict) else None
+    if not isinstance(phase, dict) or phase.get("status") != "error":
+        return ""
+    errors = phase.get("errors")
+    for entry in errors if isinstance(errors, list) else ():
+        if isinstance(entry, dict) and entry.get("code") == 1363008:
+            if "FILE_NOT_FOUND" in str(entry.get("message")) and phase.get("bytes_transferred") == 0:
+                return "Meta가 전송 파일을 찾지 못했습니다(1363008, 수신 0바이트). 릴스 호환 파일의 HTTPS 주소를 입력하거나 Instagram 웹에서 해당 파일을 선택하세요."
+    return ""
+
+
 def _discard_container(state, save_state):
     for key in ("container_id", "upload_uri", "uploaded", "video_url", "rejected_transfer"):
         state.pop(key, None)
@@ -302,7 +322,7 @@ def publish_instagram(video: Path, draft, store, state, save_state,
     uncertain=state.get("publish_attempted") or state.get("status") in ("uncertain","unknown")
     if uncertain and not _identifier(state.get("container_id")):
         raise PublishUncertain(_UNKNOWN)
-    url_mode = method == "url"
+    url_mode = method == "url" or bool(draft.instagram_video_url)
     public_url = _public_video_url(draft.instagram_video_url) if url_mode else None
     progress("instagram", 0, 100, "인스타그램 업로드 준비 중")
     with requests.Session() if session is None else nullcontext(session) as client:
@@ -320,7 +340,8 @@ def publish_instagram(video: Path, draft, store, state, save_state,
                 # provide a safe mapping; do not guess from recent account posts.
                 raise PublishUncertain(_UNKNOWN)
             status = _status(client, base, container, token, cancel)
-            if state.get("rejected_transfer") == container and status in ("IN_PROGRESS", "ERROR", "EXPIRED"):
+            replace_upload = state.get("rejected_transfer") == container or state.get("video_url") != public_url
+            if replace_upload and status in ("IN_PROGRESS", "ERROR", "EXPIRED"):
                 # A manual retry may replace an explicitly rejected upload after reconciliation.
                 _discard_container(state, save_state)
                 container = status = None
@@ -358,6 +379,11 @@ def publish_instagram(video: Path, draft, store, state, save_state,
                 if error.retriable is False:
                     state["rejected_transfer"] = container
                     save_state(state)
+                if error.inspect_transfer:
+                    detail = _transfer_failure_detail(client, base, container, token)
+                    if detail:
+                        log.warning("Instagram transfer failed: Meta 1363008 FILE_NOT_FOUND, received 0 bytes")
+                        raise PublishError(f"{error}\n{detail}") from None
                 raise
             except OSError:
                 raise PublishError("인스타그램에 전송할 영상 파일을 읽을 수 없습니다.") from None
@@ -372,6 +398,9 @@ def publish_instagram(video: Path, draft, store, state, save_state,
                 status = _status(client, base, container, token, cancel)
             _processing_failure(status, state, save_state)
             if status == "FINISHED":
+                if state.get("drive_complete") and public_url and state.get("status") != "ready":
+                    state["status"] = "ready"
+                    save_state(state)
                 break
             progress("instagram", 65 + attempt * 4, 100, "인스타그램 영상 처리 대기 중")
             if attempt + 1 == POLL_ATTEMPTS:

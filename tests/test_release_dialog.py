@@ -1,4 +1,3 @@
-from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
 from stampcut.core import settings as settings_mod
@@ -17,6 +16,14 @@ def create(qtbot,tmp_path,settings=None,service=None):
     widget=ReleaseDialog(settings or Settings(),video_path=video,suggested_title="경기 영상",store=store,service=service)
     qtbot.addWidget(widget)
     return widget,video
+
+
+def test_unified_account_can_supply_hosted_video_without_reconnecting(qtbot, tmp_path):
+    widget, _ = create(qtbot, tmp_path)
+    widget.store.put("instagram", {"method": "unified", "account_id": "100"})
+    widget._refresh_accounts()
+    assert not widget.instagram_url_edit.isHidden()
+    assert widget.draft().instagram_video_url == ""
 
 
 def test_result_release_button_passes_completed_file(qtbot,tmp_path):
@@ -224,3 +231,82 @@ def test_cancel_unsaved_close_does_not_leave_main_shutdown_pending(qtbot,tmp_pat
     assert window.isVisible() and widget.isVisible() and not window._release_close_requested
     monkeypatch.setattr(QMessageBox,"warning",lambda *a,**k:QMessageBox.Discard)
     widget.reject();window.close()
+
+
+def test_drive_connection_selects_automatic_sharing_and_excludes_manual_url(qtbot, tmp_path):
+    widget, _ = create(qtbot, tmp_path)
+    widget.store.put("instagram", {"method": "unified"})
+    widget.store.put("drive", {"refresh_token": "secret"})
+    widget._refresh_accounts()
+    assert widget.drive_check.isChecked()
+    assert not widget.drive_help.isHidden()
+    assert "링크가 있는 모든 사용자" in widget.drive_help.text()
+    assert widget.instagram_url_edit.isHidden() and widget.prepare_btn.isHidden()
+    widget.drive_check.setChecked(False)
+    assert not widget.instagram_url_edit.isHidden()
+    widget.instagram_url_edit.setText("https://media.example/file.mp4")
+    assert widget.draft().instagram_video_url == "https://media.example/file.mp4"
+    widget.drive_check.setChecked(True)
+    assert widget.draft().instagram_use_drive and widget.draft().instagram_video_url == ""
+    assert widget.flush_draft()
+    assert widget.settings.publish_draft["instagram_use_drive"]
+
+
+def test_saved_manual_choice_survives_reopen_and_new_video_defaults_to_drive(qtbot, tmp_path):
+    from stampcut.gui.release_dialog import ReleaseDialog
+    widget, video = create(qtbot, tmp_path)
+    widget.store.put("instagram", {"method": "url"})
+    widget.store.put("drive", {"refresh_token": "secret"})
+    widget._refresh_accounts()
+    widget.drive_check.setChecked(False)
+    widget.reject()
+    reopened = ReleaseDialog(widget.settings, video_path=video, store=widget.store)
+    qtbot.addWidget(reopened)
+    assert not reopened.drive_check.isChecked()
+    reopened.video_edit.setText(str(tmp_path / "next.mp4"))
+    assert reopened.drive_check.isChecked()
+
+
+def test_missing_drive_prompts_reconnect_instead_of_starting_upload(qtbot, tmp_path, monkeypatch):
+    widget, _ = create(qtbot, tmp_path)
+    widget.store.put("instagram", {"method": "url"})
+    widget.store.put("drive", {"refresh_token": "secret"})
+    widget._refresh_accounts()
+    widget.store.delete("drive")
+    widget._refresh_accounts()
+    queued = []
+    monkeypatch.setattr(widget.pool, "start", queued.append)
+    widget.upload_btn.click()
+    assert not queued and "Drive" in widget.message.text()
+    widget.drive_check.setChecked(False)
+    assert not widget.instagram_url_edit.isHidden()
+
+
+def test_success_with_drive_cleanup_warning_allows_retry(qtbot, tmp_path):
+    widget, _ = create(qtbot, tmp_path)
+    post = PublishedPost("instagram", "123", "https://www.instagram.com/p/123/")
+    widget._show_results(BatchResult([PublishOutcome("instagram", "success", post, "Drive 공유 해제 실패")]))
+    assert widget.upload_btn.isEnabled()
+    assert "공유 해제" in widget.upload_btn.text()
+
+
+def test_connecting_drive_after_saving_an_unconnected_draft_selects_it(qtbot, tmp_path):
+    from stampcut.gui.release_dialog import ReleaseDialog
+    widget, video = create(qtbot, tmp_path)
+    assert not widget.drive_check.isEnabled()
+    widget.reject()
+    reopened = ReleaseDialog(widget.settings, video_path=video, store=widget.store)
+    qtbot.addWidget(reopened)
+    reopened.store.put("drive", {"refresh_token": "secret"})
+    reopened._refresh_accounts()
+    assert reopened.drive_check.isChecked()
+
+def test_success_with_unrecorded_receipt_does_not_offer_drive_retry(qtbot, tmp_path):
+    widget, _ = create(qtbot, tmp_path)
+    post = PublishedPost("instagram", "123", "https://www.instagram.com/p/123/")
+    outcome = PublishOutcome("instagram", "success", post, "게시 완료 · 로컬 완료 기록을 저장하지 못했습니다.")
+    widget._show_results(BatchResult([outcome]))
+    assert not widget.upload_btn.isEnabled()
+    outcome.error += "\nGoogle Drive 공유 해제 실패"
+    widget._show_results(BatchResult([outcome]))
+    assert not widget.upload_btn.isEnabled()

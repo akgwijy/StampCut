@@ -32,6 +32,7 @@ class ReleaseDraft:
     instagram_prepared_path: str=""
     instagram_source_fingerprint: str=""
     video_stamp: str=""
+    instagram_use_drive: bool=False
 
     @classmethod
     def from_dict(cls,data):

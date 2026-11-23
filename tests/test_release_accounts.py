@@ -255,3 +255,31 @@ def test_disconnect_only_deletes_the_selected_platform_and_clears_masked_token(q
     assert dialog.yt_file_edit.text() == ""
     assert "Channel" not in dialog.yt_account_label.text()
     assert not dialog.yt_disconnect_btn.isEnabled()
+
+
+@pytest.mark.parametrize("path", ["", "C:/oauth/client.json"])
+def test_drive_connect_uses_chosen_or_stored_client_and_disconnects_locally(qtbot, tmp_path, monkeypatch, path):
+    mod, store, dialog = make_dialog(qtbot, tmp_path)
+    jobs = queued_jobs(dialog, monkeypatch)
+    store.put("youtube", {"refresh_token": "YT-REFRESH"})
+    seen = []
+
+    def connect(client_file, supplied_store, *, progress, cancel):
+        seen.append(client_file)
+        credentials = {"refresh_token": "DRIVE-SECRET"}
+        supplied_store.put("drive", credentials)
+        return credentials
+
+    monkeypatch.setattr(mod, "connect_drive", connect, raising=False)
+    dialog.drive_file_edit.setText(path)
+    dialog.drive_connect_btn.click()
+    assert dialog.is_busy and not dialog.drive_file_edit.isEnabled()
+    jobs[0].run()
+    assert seen == [path or None]
+    assert dialog.drive_disconnect_btn.isEnabled()
+    assert "DRIVE-SECRET" not in dialog.drive_account_label.text()
+    reopened = mod.ReleaseAccountsDialog(store)
+    qtbot.addWidget(reopened)
+    assert reopened.drive_disconnect_btn.isEnabled()
+    reopened.drive_disconnect_btn.click()
+    assert store.get("drive") == {} and store.get("youtube")["refresh_token"] == "YT-REFRESH"
