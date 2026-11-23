@@ -432,6 +432,32 @@ def test_rupload_failure_logs_duration_and_safe_codes_without_raw_response(video
     assert TOKEN not in caplog.text and "private-value" not in caplog.text and UPLOAD not in caplog.text
 
 
+def test_transfer_error_shows_provider_reason_and_trace_without_token(video, store, caplog):
+    response = Response({"debug_info": {"type": "ProcessingFailedError", "retriable": False,
+                        "message": "Invalid video format: access_token=" + TOKEN}}, 400)
+    response.headers = {"x-fb-trace-id": "trace_1234"}
+    session = Session(Response({"id": "200", "uri": UPLOAD}), response)
+    with pytest.raises(PublishError) as exc:
+        publish(video, store, session)
+    assert "Invalid video format" in str(exc.value) and "trace_1234" in str(exc.value)
+    assert TOKEN not in str(exc.value) + caplog.text
+    assert session.calls[1]["headers"]["Content-Type"] == "application/octet-stream"
+
+
+def test_manual_retry_replaces_rejected_transfer_only_after_checking_status(video, store):
+    state = {}
+    failure = Response({"debug_info": {"type": "ProcessingFailedError", "retriable": False}}, 400)
+    with pytest.raises(PublishError):
+        publish(video, store, Session(Response({"id": "200", "uri": UPLOAD}), failure), state=state)
+    retry = Session(Response({"status_code": "IN_PROGRESS"}), Response({"id": "201"}),
+                    Response({"success": True}), Response({"status_code": "FINISHED"}),
+                    Response({"id": "300"}), Response({"permalink": LINK}))
+    publish(video, store, retry, state=state)
+    assert retry.calls[0]["url"] == f"{BASE}/200"
+    assert retry.calls[1]["url"].endswith("/media")
+    assert retry.calls[2]["url"].endswith("/201")
+
+
 def test_retry_checks_existing_container_before_transmitting_video_again(video, store):
     first = Session(Response({"id": "200", "uri": UPLOAD}), Response({
         "debug_info": {"type": "ProcessingFailedError", "message": "Request processing failed"},

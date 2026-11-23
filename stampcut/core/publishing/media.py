@@ -25,6 +25,11 @@ class MediaInfo:
     video_codec: str="h264"
     audio_codec: str="aac"
     audio_bitrate: int=128000
+    pixel_aspect: Fraction = Fraction(1)
+
+    def same_geometry(self, other):
+        return (self.width, self.height, self.pixel_aspect) == (other.width, other.height, other.pixel_aspect)
+
 
 
 def _frame_rate(stream):
@@ -74,7 +79,15 @@ def inspect_video(video:Path,paths=None)->MediaInfo:
             raise ValueError("invalid media")
         bitrate=audio.get("bit_rate")
         audio_bitrate=int(bitrate) if bitrate not in (None,"","N/A") else 0
-        return MediaInfo(geometry.width,geometry.height,duration,size,geometry.has_audio,fps,stream.get("codec_name",""),audio.get("codec_name",""),audio_bitrate)
+        ratio = stream.get("sample_aspect_ratio")
+        pixel_aspect = Fraction(1) if ratio in (None, "", "N/A", "0:1") else Fraction(ratio.replace(":", "/"))
+        if pixel_aspect <= 0:
+            raise ValueError("invalid pixel aspect ratio")
+        rotation = next((item["rotation"] for item in stream.get("side_data_list", []) if "rotation" in item),
+                        stream.get("tags", {}).get("rotate") or 0)
+        if abs(int(float(rotation))) % 180 == 90:
+            pixel_aspect = 1 / pixel_aspect
+        return MediaInfo(geometry.width,geometry.height,duration,size,geometry.has_audio,fps,stream.get("codec_name",""),audio.get("codec_name",""),audio_bitrate,pixel_aspect)
     except Exception:
         raise PublishError("영상 정보를 확인하지 못했습니다. 재생 가능한 MP4/MOV 파일인지 확인하세요.") from None
 
@@ -112,7 +125,7 @@ def _compatible_instagram(info,source):
     except PublishError:
         return False
     return (info.video_codec=="h264" and info.has_audio and info.audio_codec=="aac"
-            and info.width<=1920 and info.height<=1920 and info.width%2==info.height%2==0
+            and info.same_geometry(source) and info.width%2==info.height%2==0
             and abs(info.fps-30)<0.001 and abs(info.duration-source.duration)<=0.05)
 
 
@@ -127,6 +140,9 @@ def prepare_instagram(video:Path,paths,cache_key:str,progress=noop,cancel=None)-
     output=root/"instagram-v2.mp4"
     source=inspect_video(video,paths)
     validate_media(source,"instagram")
+    if source.width > 1920 or source.width % 2 or source.height % 2:
+        raise PublishError(f"원본 해상도 {source.width}×{source.height}를 유지해 릴스용 H.264 영상을 만들 수 없습니다. "
+                           "가로 1920픽셀 이하이고 가로·세로가 짝수인 영상을 선택하세요.")
     check_cancel(cancel)
     if output.is_file():
         try:
@@ -143,7 +159,6 @@ def prepare_instagram(video:Path,paths,cache_key:str,progress=noop,cancel=None)-
         cmd += ["-f","lavfi","-i","anullsrc=r=48000:cl=stereo"]
     cmd += [
         "-map", "0:v:0", "-map", "0:a:0" if source.has_audio else "1:a:0", "-map_metadata", "-1",
-        "-vf", "scale=1920:1920:force_original_aspect_ratio=decrease:force_divisible_by=2",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-maxrate", "25M", "-bufsize", "50M",
         "-pix_fmt", "yuv420p", "-r", "30", "-x264-params", "open-gop=0",
         "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-t", str(source.duration),
@@ -155,6 +170,8 @@ def prepare_instagram(video:Path,paths,cache_key:str,progress=noop,cancel=None)-
         prepared=inspect_video(temp,paths)
         if prepared.size>INSTAGRAM_MAX_BYTES:
             raise PublishError("인스타그램용 파일이 300MB를 넘습니다. 영상 길이를 줄여 주세요.")
+        if not prepared.same_geometry(source):
+            raise PublishError("전송본의 해상도 또는 화면 비율이 원본과 달라 업로드를 중단했습니다.")
         if not _compatible_instagram(prepared,source):
             raise PublishError("변환된 영상이 인스타그램 릴스 규격에 맞지 않습니다. 영상 길이와 ffmpeg 설정을 확인하세요.")
         check_cancel(cancel)

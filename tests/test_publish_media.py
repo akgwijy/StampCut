@@ -189,7 +189,7 @@ def test_legacy_cache_is_not_used_for_instagram_retries(monkeypatch, tmp_path, s
 
 @pytest.mark.parametrize("cached", [PublishError("corrupt cache"), replace(GOOD, video_codec="vp9"),
                                     replace(GOOD, audio_codec="mp3"), replace(GOOD, audio_bitrate=192000),
-                                    replace(GOOD, width=3840), replace(GOOD, fps=120), replace(GOOD, duration=3.0),
+                                    replace(GOOD, width=3840), replace(GOOD, pixel_aspect=2), replace(GOOD, fps=120), replace(GOOD, duration=3.0),
                                     replace(GOOD, has_audio=False), replace(GOOD, size=300_000_001)])
 def test_stale_or_incompatible_cache_is_rebuilt_atomically(monkeypatch, tmp_path, source, cached):
     runs = configure_preparation(monkeypatch, tmp_path, cached_info=cached)
@@ -211,6 +211,20 @@ def test_conversion_sets_required_codecs_and_does_not_modify_source(monkeypatch,
     assert "faststart" in command[command.index("-movflags") + 1].split("+")
     assert command[command.index("-use_editlist") + 1] == "0"
     assert output != source and source.read_bytes() == before
+
+
+def test_oversize_source_is_blocked_before_conversion(monkeypatch, tmp_path, source):
+    runs = configure_preparation(monkeypatch, tmp_path, source_info=replace(GOOD, width=3840))
+    with pytest.raises(PublishError, match="해상도"):
+        media.prepare_instagram(source, PATHS, "source-sha")
+    assert not runs
+
+
+def test_smaller_cached_copy_is_rebuilt(monkeypatch, tmp_path, source):
+    runs = configure_preparation(monkeypatch, tmp_path, cached_info=replace(GOOD, width=720, height=1280))
+    cached_output(tmp_path)
+    media.prepare_instagram(source, PATHS, "source-sha")
+    assert len(runs) == 1
 
 
 def test_silent_source_gets_an_audio_track(monkeypatch, tmp_path, source):
@@ -262,7 +276,7 @@ def local_ffmpeg():
     return paths
 
 
-def synthetic_video(paths, output, *, duration=3.2, audio_duration=3.2, size="2304x1296", fps=30):
+def synthetic_video(paths, output, *, duration=3.2, audio_duration=3.2, size="1280x720", fps=30):
     command = [str(paths.ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
                f"color=c=blue:s={size}:r={fps}:d={duration}", "-f", "lavfi", "-i",
                f"sine=frequency=440:sample_rate=48000:duration={audio_duration}", "-c:v", "libx264", "-preset", "ultrafast",
@@ -281,7 +295,7 @@ def test_local_preparation_transcodes_192k_audio_and_verifies_faststart(local_ff
     info = media.inspect_video(output, local_ffmpeg)
     assert info.video_codec == "h264" and info.audio_codec == "aac"
     assert info.audio_bitrate <= 132000 and 3 <= info.duration <= 900
-    assert info.width <= 1920 and info.height <= 1920 and info.fps == 30
+    assert (info.width, info.height, info.fps) == (1280, 720, 30)
     assert info.size <= 300_000_000 and output != source
     binary = output.read_bytes()
     assert 0 <= binary.find(b"moov") < binary.find(b"mdat")

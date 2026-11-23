@@ -27,9 +27,10 @@ _UNKNOWN = "인스타그램 게시 결과를 확인할 수 없습니다. 중복 
 
 
 class _APIError(PublishError):
-    def __init__(self, message, definitive=False):
+    def __init__(self, message, definitive=False, retriable=None):
         super().__init__(message)
         self.definitive = definitive
+        self.retriable = retriable
 
 
 def _identifier(value):
@@ -47,6 +48,18 @@ def _configuration(account_id, access_token, method, api_version, *, discover=Fa
         raise PublishError("인스타그램 Graph API 버전을 v26.0 형식으로 입력하세요.")
     host = "graph.facebook.com" if method != "url" else "graph.instagram.com"
     return f"https://{host}/{api_version}"
+
+
+def _display_reason(value, token):
+    """Show a bounded provider explanation without echoing credentials or signed URLs."""
+    if not isinstance(value, str) or value.lstrip().startswith(("{", "[")):
+        return ""
+    text = " ".join(value.split()).replace(token, "[가림]")
+    text = re.sub(r"https?://\S+", "[URL]", text, flags=re.I)
+    text = re.sub(r"\b(?:authorization|access[_ -]?token|client_secret|appsecret_proof|oauth|bearer)\b.*$",
+                  "[가림]", text, flags=re.I)
+    text = re.sub(r"[A-Za-z0-9_.=-]{32,}", "[가림]", text)
+    return text[:280]
 
 
 def _request(session, method, url, token, *, stage="계정 확인", headers=None, **kwargs):
@@ -100,13 +113,21 @@ def _request(session, method, url, token, *, stage="계정 확인", headers=None
         if processing_failed:
             details.append("ProcessingFailedError")
         message = f"{stage} ({', '.join(details)}) · {message}"
+        trace = (error.get("fbtrace_id") if isinstance(error, dict) else None) or payload.get("fbtrace_id")
+        trace = trace or getattr(response, "headers", {}).get("x-fb-trace-id")
+        if isinstance(trace, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,96}", trace) and token not in trace:
+            message += f" (Meta 추적 ID {trace})"
         retriable = debug.get("retriable")
         log.warning("%s [elapsed=%.1fs, retriable=%s]", message, time.monotonic() - started,
                     retriable if isinstance(retriable, bool) else "unknown")
         definitive = (400 <= response.status_code < 500
                       and (code in (102, 190, 10, 200, 294, 4, 17, 32, 341, 613)
                            or response.status_code in (401, 403, 429)))
-        raise _APIError(message, definitive=definitive)
+        if stage == "파일 전송":
+            reason = _display_reason(raw_message, token)
+            if reason:
+                message += f"\nMeta 상세: {reason}"
+        raise _APIError(message, definitive=definitive, retriable=retriable)
     return payload
 
 
@@ -245,7 +266,7 @@ def _status(client, base, container, token, cancel):
 
 
 def _discard_container(state, save_state):
-    for key in ("container_id", "upload_uri", "uploaded", "video_url"):
+    for key in ("container_id", "upload_uri", "uploaded", "video_url", "rejected_transfer"):
         state.pop(key, None)
     state["status"] = "failed"
     save_state(state)
@@ -299,8 +320,13 @@ def publish_instagram(video: Path, draft, store, state, save_state,
                 # provide a safe mapping; do not guess from recent account posts.
                 raise PublishUncertain(_UNKNOWN)
             status = _status(client, base, container, token, cancel)
-            _processing_failure(status, state, save_state)
-        else:
+            if state.get("rejected_transfer") == container and status in ("IN_PROGRESS", "ERROR", "EXPIRED"):
+                # A manual retry may replace an explicitly rejected upload after reconciliation.
+                _discard_container(state, save_state)
+                container = status = None
+            else:
+                _processing_failure(status, state, save_state)
+        if not container:
             check_cancel(cancel)
             data = {"media_type": "REELS", "caption": draft.body}
             data.update({"video_url": public_url} if url_mode else {"upload_type": "resumable"})
@@ -325,8 +351,14 @@ def publish_instagram(video: Path, draft, store, state, save_state,
                 log.info("Instagram file transfer: %d bytes", size)
                 with Path(video).open("rb") as file:
                     response = _request(client, "POST", uri, token, stage="파일 전송",
-                                        headers={"Authorization": f"OAuth {token}", "offset": "0", "file_size": str(size)},
+                                        headers={"Authorization": f"OAuth {token}", "offset": "0",
+                                                 "file_size": str(size), "Content-Type": "application/octet-stream"},
                                         data=_VideoReader(file, size, progress, cancel))
+            except _APIError as error:
+                if error.retriable is False:
+                    state["rejected_transfer"] = container
+                    save_state(state)
+                raise
             except OSError:
                 raise PublishError("인스타그램에 전송할 영상 파일을 읽을 수 없습니다.") from None
             if response.get("success") is not True:

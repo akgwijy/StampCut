@@ -101,6 +101,8 @@ class ReleaseService:
                 raise PublishError("인스타그램 호환 파일이 없습니다. 릴스 호환 파일 준비를 다시 누르세요.")
             for platform in targets:
                 target_info = self.inspector(instagram_file, self.paths) if platform == "instagram" and instagram_file != video else info
+                if platform == "instagram" and url_mode and not target_info.same_geometry(info):
+                    raise PublishError("릴스 호환 파일의 해상도 또는 화면 비율이 원본과 다릅니다. 호환 파일을 다시 준비하세요.")
                 validate_media(target_info, platform, accounts[platform].get("method", "resumable"))
             fingerprint = file_fingerprint(video, cancel)
             if url_mode:
