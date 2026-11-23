@@ -775,3 +775,82 @@ def test_channel_urls_do_not_clobber_running_analysis(qtbot):
     w._on_channel_urls(["https://youtu.be/AAAAAAAAAAA"])
     assert w.status_panel.message.text() == "댓글 수집 중" and w.url_panel.urls() == ["https://youtu.be/AAAAAAAAAAA"]
     worker.done = True  # teardown에서 창을 닫을 때 종료 확인창(모달)이 뜨지 않게
+
+
+def test_named_projects_switch_edit_and_release_without_publishing(qtbot, tmp_path, make_video, make_clip, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    a, b = (tmp_path / "A.stampcut", tmp_path / "B.stampcut")
+    choices = iter((a, b))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(next(choices)), ""))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(a), ""))
+    w = MainWindow(Settings(api_key="secret-a"), project_file=tmp_path / "recover.json")
+    qtbot.addWidget(w)
+    v = make_video()
+    clip = make_clip(v, 60, caption="골")
+    w._adopt_project(Project([v.url], "경기 A", [v], [clip]), restored=True)
+    w.settings.title_font_size = 82
+    w.settings.publish_draft = {"body": "첫 경기 게시글"}
+    rendered = tmp_path / "A.mp4"
+    rendered.write_bytes(b"finished")
+    w._on_rendered(rendered)
+    w.save_action.trigger()
+    assert a.is_file() and "secret-a" not in a.read_text("utf-8")
+    w.new_action.trigger()
+    assert not w.url_panel.title() and w.model.rowCount() == 0
+    assert not w.status_panel.has_result() and not w.settings.publish_draft
+    w.url_panel.set_title("경기 B")
+    w.url_panel.urls_edit.setPlainText(v.url)
+    w.settings.title_font_size = 41
+    w.settings.publish_draft = {"body": "둘째 경기"}
+    w.save_action.trigger()
+    w.open_action.trigger()
+    assert w.url_panel.title() == "경기 A" and w.model.clip_at(0).caption == "골"
+    assert w.settings.title_font_size == 82 and w.settings.publish_draft["body"] == "첫 경기 게시글"
+    assert w.status_panel.result_path() == rendered
+    deliveries = []
+    class Dialog(QDialog):
+        def __init__(self, settings, *, video_path, **kwargs):
+            super().__init__()
+            deliveries.append((video_path, settings.publish_draft["body"]))
+        def exec(self):
+            return QDialog.Rejected
+    monkeypatch.setattr(main_window, "ReleaseDialog", Dialog)
+    w.release_action.trigger()
+    assert deliveries == [(rendered, "첫 경기 게시글")]
+    w.url_panel.set_title("경기 A 수정")
+    w.save_action.trigger()
+    assert project_io.load(a).title == "경기 A 수정"
+    assert project_io.load(b).title == "경기 B"
+    assert not w.status_panel.has_result()
+
+
+def test_switch_cancel_keeps_unsaved_project(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    w = MainWindow(Settings(), project_file=tmp_path / "recover.json")
+    qtbot.addWidget(w)
+    w.url_panel.set_title("미완성")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Cancel)
+    w.new_action.trigger()
+    assert w.url_panel.title() == "미완성"
+
+
+def test_named_preanalysis_recovery_keeps_save_target_and_local_api_key(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    named = tmp_path / "초안.stampcut"
+    recovery = tmp_path / "recovery.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(named), ""))
+    first = MainWindow(Settings(api_key="old-secret"), project_file=recovery)
+    qtbot.addWidget(first)
+    first.url_panel.urls_edit.setPlainText("https://youtu.be/abcdefghijk")
+    first.url_panel.set_title("첫 편집")
+    first.save_action.trigger()
+    first.url_panel.set_title("이어서 편집")
+    first.close()
+    assert project_io.load(named).title == "첫 편집"
+
+    reopened = MainWindow(Settings(api_key="new-secret"), project_file=recovery)
+    qtbot.addWidget(reopened)
+    assert reopened.document_path == named and reopened.url_panel.title() == "이어서 편집"
+    assert reopened.settings.api_key == "new-secret"
+    reopened.save_action.trigger()
+    assert project_io.load(named).title == "이어서 편집"

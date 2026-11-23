@@ -1,7 +1,10 @@
 """메인 창: 패널 조립과 분석 → 미리보기 → 렌더 흐름."""
 from __future__ import annotations
 
+import json
 import logging
+from copy import deepcopy
+from dataclasses import asdict
 import shutil
 from pathlib import Path
 
@@ -9,6 +12,8 @@ from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QFileDialog,
     QComboBox,
     QLabel,
     QGroupBox,
@@ -33,7 +38,7 @@ from stampcut.core import settings as settings_mod
 from stampcut.core.downloader import Downloader, preview_covers
 from stampcut.core.ffmpeg import Cancelled, find_ffmpeg
 from stampcut.core.models import Clip, ClipStatus, Project, Settings
-from stampcut.core.renderer import unique_output_path
+from stampcut.core.renderer import sanitize_filename, unique_output_path
 from stampcut.core.youtube_api import ApiKeyError, QuotaError, VideoNotFound, YouTubeClient
 from stampcut.gui.bgm_panel import BgmPanel
 from stampcut.gui.channel_dialog import ChannelDialog
@@ -89,6 +94,8 @@ class MainWindow(QMainWindow):
         self._release_dialog = None
         self._release_close_requested = False
         self._url_export_dialog: UrlExportDialog | None = None
+        self.document_path: Path | None = None
+        self._saved_document: dict | None = None
         self.project_file = project_file
         self.project: Project | None = None
         self.pool = QThreadPool.globalInstance()
@@ -107,6 +114,14 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"StampCut {__version__}")
         self.resize(1280, 900)
+        file_menu = self.menuBar().addMenu("파일")
+        self.new_action = file_menu.addAction("새 작업", self.new_project)
+        self.open_action = file_menu.addAction("작업 열기…", self.open_project)
+        self.save_action = file_menu.addAction("작업 저장", self.save_project)
+        self.save_as_action = file_menu.addAction("다른 이름으로 저장…", self.save_project_as)
+        for action, shortcut in ((self.new_action, QKeySequence.New), (self.open_action, QKeySequence.Open),
+                                 (self.save_action, QKeySequence.Save), (self.save_as_action, QKeySequence.SaveAs)):
+            action.setShortcut(shortcut)
         toolbar = QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
@@ -132,6 +147,7 @@ class MainWindow(QMainWindow):
         self.url_panel.source_changed.connect(self._on_urls_changed)
         self.url_panel.title_edit.textChanged.connect(self._on_title_changed)
         self.url_panel.urls_edit.textChanged.connect(self._on_urls_changed)
+        self.url_panel.comment_filter_edit.textChanged.connect(self._schedule_autosave)
 
         self.model = ClipTableModel(self.settings)
         self.model.changed.connect(self._on_table_changed)
@@ -239,7 +255,115 @@ class MainWindow(QMainWindow):
         if self.project_file is not None:
             restored = project_io.load(self.project_file)
             if restored is not None:
+                named = Path(restored.recovery_document)
+                if named.suffix.lower() == ".stampcut" and named.is_file():
+                    saved = project_io.load(named)
+                    if saved is not None:
+                        self._set_document_path(named)
+                        self._saved_document = project_io.document(saved)
                 self._adopt_project(restored, restored=True)
+
+    def _set_document_path(self, path: Path | None) -> None:
+        self.document_path = path
+        label = path.name if path else "새 작업"
+        self.setWindowTitle(f"StampCut {__version__} · {label}")
+
+    def _capture_project(self) -> Project:
+        project = self.project or Project(self.url_panel.urls(), self.url_panel.title(), [], [],
+                                          output_mode=self.settings.output_mode,
+                                          **self.url_panel.source_panel.metadata())
+        if not project.clips and self.url_panel.source_panel.selection_ready():
+            project.videos = list(self.url_panel.source_panel.selected_videos)
+        project.comment_filter = self.url_panel.comment_filter()
+        project.editor_settings = project_io.editor_settings(self.settings)
+        return project
+
+    def _commit_table_editor(self) -> None:
+        focus = QApplication.focusWidget()
+        if focus is not None and self.table.isAncestorOf(focus):
+            focus.clearFocus()
+
+    def _choose_document(self) -> Path | None:
+        folder = self.document_path.parent if self.document_path else settings_mod.resolve_output_dir(self.settings)
+        title = sanitize_filename(self.url_panel.title() or "새 작업")
+        name, _ = QFileDialog.getSaveFileName(self, "작업 저장", str(folder / (title + ".stampcut")),
+                                              "StampCut 작업 (*.stampcut)")
+        if not name:
+            return None
+        path = Path(name)
+        if path.suffix.lower() == ".stampcut":
+            return path
+        destination = Path(str(path) + ".stampcut")
+        if destination.exists() and QMessageBox.question(
+                self, "다른 이름으로 저장", f"{destination.name} 파일을 덮어쓸까요?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return None
+        return destination
+
+    def _write_document(self, path: Path | None) -> bool:
+        if path is None:
+            return False
+        project = self._capture_project()
+        try:
+            project_io.save(project, path)
+        except (OSError, ValueError) as error:
+            self._warn(f"작업을 저장하지 못했습니다.\n{error}")
+            return False
+        self._set_document_path(path)
+        self._saved_document = deepcopy(project_io.document(project))
+        self._flush_autosave()
+        self.statusBar().showMessage(f"작업 저장됨 · {path.name}", 5000)
+        return True
+
+    def save_project(self) -> bool:
+        self._commit_table_editor()
+        return self._write_document(self.document_path or self._choose_document())
+
+    def save_project_as(self) -> bool:
+        self._commit_table_editor()
+        return self._write_document(self._choose_document())
+
+    def _can_switch_document(self) -> bool:
+        self._commit_table_editor()
+        project = self._capture_project()
+        if self._saved_document is not None:
+            if project_io.document(project) == self._saved_document:
+                return True
+        elif not (project.title or project.urls or project.clips or project.source_channel or project.comment_filter
+                  or self.project and project.editor_settings.get("publish_draft")):
+            return True
+        answer = QMessageBox.question(self, "편집 작업 저장", "현재 작업을 저장하고 전환할까요?",
+                                      QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+        return answer == QMessageBox.Discard or (answer == QMessageBox.Save and self.save_project())
+
+    def new_project(self) -> None:
+        if not self._can_switch_document():
+            return
+        self._autosave_timer.stop()
+        self._set_document_path(None)
+        self.settings.publish_draft = {}
+        self._adopt_project(Project([], "", [], [], output_mode=self.settings.output_mode), restored=True)
+        self._saved_document = deepcopy(project_io.document(self._capture_project()))
+        self.status_panel.set_idle("새 작업 · 편집할 영상 주소를 입력하세요")
+        self._flush_autosave()
+
+    def open_project(self) -> None:
+        folder = self.document_path.parent if self.document_path else settings_mod.resolve_output_dir(self.settings)
+        name, _ = QFileDialog.getOpenFileName(self, "작업 열기", str(folder), "StampCut 작업 (*.stampcut)")
+        if not name:
+            return
+        path = Path(name)
+        if not self._can_switch_document():
+            return
+        project = project_io.load(path)
+        if project is None:
+            self._warn("작업 파일을 읽지 못했습니다. 파일 위치와 형식을 확인하세요.")
+            return
+        self._autosave_timer.stop()
+        self._set_document_path(path)
+        self._adopt_project(project, restored=True)
+        self._saved_document = deepcopy(project_io.document(self._capture_project()))
+        self._flush_autosave()
 
     def open_release(self,video_path=None) -> None:
         if self._foreground_worker is not None or self._rendering():
@@ -248,12 +372,19 @@ class MainWindow(QMainWindow):
             self._release_dialog.raise_()
             return
         path=video_path if video_path is not None else self.status_panel.result_path()
+        if path is None and self.project and self.project.rendered_path:
+            rendered = Path(self.project.rendered_path)
+            if rendered.is_file() and self.project.rendered_signature == self._render_signature():
+                path = rendered
+            elif self.settings.publish_draft.get("video_path") == str(rendered):
+                path = ""
         dialog=ReleaseDialog(self.settings,paths=self.ffpaths,video_path=path,suggested_title=self.project.title if self.project else "",parent=self)
         self._release_dialog=dialog
         try:
             dialog.exec()
         finally:
             self._release_dialog=None
+            self._schedule_autosave()
             dialog.deleteLater()
             if self._release_close_requested:
                 self._release_close_requested=False
@@ -289,6 +420,7 @@ class MainWindow(QMainWindow):
         self.bgm_panel.set_bgm_dir(s.bgm_dir)
         self._check_full_preview()
         self._update_preview_download_button()
+        self._schedule_autosave()
 
     def _on_output_mode_changed(self, _index: int) -> None:
         self._set_output_mode(self.output_mode_combo.currentData())
@@ -309,6 +441,7 @@ class MainWindow(QMainWindow):
         self.status_panel.update_summary(self.project, self.settings)
         self._update_preview_download_button()
         if persist:
+            self._check_full_preview()
             settings_mod.save(self.settings)
             self._schedule_autosave()
 
@@ -316,6 +449,7 @@ class MainWindow(QMainWindow):
         # PreviewWidget이 공유 Settings 객체를 직접 고쳤으므로 저장만 하면 된다
         settings_mod.save(self.settings)
         self._check_full_preview()
+        self._schedule_autosave()
 
     # --- 분석 ---
     def open_url_export(self) -> None:
@@ -396,6 +530,9 @@ class MainWindow(QMainWindow):
         if self._preview_worker is not None:
             self._preview_worker.cancel.set()
         self.project = project
+        if restored and project.editor_settings:
+            self.settings = project_io.restore_settings(self.settings, project.editor_settings)
+            self.status_panel.set_output_dir(settings_mod.resolve_output_dir(self.settings))
         self.url_panel.set_export_available(any(clip.mentions for clip in project.clips))
         self._set_output_mode(project.output_mode, preserve_clips=False, persist=False)
         if restored:
@@ -414,8 +551,14 @@ class MainWindow(QMainWindow):
         self.status_panel.update_summary(project, self.settings)
         if project.clips:
             self.table.selectRow(0)
+        else:
+            self.preview.set_clip(None)
         if restored:
             self.status_panel.set_idle(FFMPEG_MISSING if self.ffpaths is None else "이전 작업을 불러왔습니다 — 이어서 편집하세요")
+            if project.rendered_path and project.rendered_signature == self._render_signature():
+                path = Path(project.rendered_path)
+                if path.is_file():
+                    self.status_panel.set_done(path)
         self._schedule_autosave()
 
     def _on_analyze_failed(self, msg: str) -> None:
@@ -575,11 +718,12 @@ class MainWindow(QMainWindow):
             self.project.urls = self.url_panel.urls()
             for name, value in self.url_panel.source_panel.metadata().items():
                 setattr(self.project, name, value)
-            self._schedule_autosave()
+        self._schedule_autosave()
 
     def _on_output_dir_changed(self, d: str) -> None:
         self.settings.output_dir = d
         settings_mod.save(self.settings)
+        self._schedule_autosave()
 
     # --- 채널 영상 찾기 ---
     def find_period_videos(self) -> None:
@@ -669,6 +813,7 @@ class MainWindow(QMainWindow):
     def _on_audio_changed(self) -> None:
         if self.project:
             self.preview.set_audio_mix(self.project.audio)
+            self._check_full_preview()
             self._schedule_autosave()
 
     def _on_listen_toggled(self, on: bool) -> None:
@@ -680,7 +825,14 @@ class MainWindow(QMainWindow):
         self.settings.bgm_dir = d
         settings_mod.save(self.settings)
 
+    def _render_signature(self) -> str:
+        return json.dumps([pipeline.preview_signature(self.project, self.settings), asdict(self.project.audio)],
+                          sort_keys=True, ensure_ascii=False)
+
     def _check_full_preview(self) -> None:
+        if (self.project and self.project.rendered_path and self.status_panel.has_result()
+                and self.project.rendered_signature != self._render_signature()):
+            self.status_panel.set_idle("편집 내용이 바뀌었습니다 · 업로드할 영상을 다시 만드세요")
         sig = self.preview.full_signature()
         if sig is not None and self.project and sig != pipeline.preview_signature(self.project, self.settings):
             self.preview.mark_full_preview_stale()
@@ -766,6 +918,8 @@ class MainWindow(QMainWindow):
         for c in self.project.clips:  # 모델을 갈아끼우면 선택/미리보기가 풀리므로 행만 갱신한다
             self.model.refresh_row(c)
         self.status_panel.update_summary(self.project, self.settings)
+        self.project.rendered_path = str(path)
+        self.project.rendered_signature = self._render_signature()
         self.status_panel.set_done(path)
         skipped = [c for c in self.project.clips if c.id in self._render_candidates and not c.enabled]
         if skipped:
@@ -818,6 +972,8 @@ class MainWindow(QMainWindow):
         self.settings_action.setEnabled(not busy)
         self.output_mode_combo.setEnabled(not busy)
         self.release_action.setEnabled(not busy)
+        for action in (self.new_action, self.open_action, self.save_action, self.save_as_action):
+            action.setEnabled(not busy)
         self.bgm_panel.set_busy(busy)
         self._update_preview_download_button(busy)
 
@@ -832,15 +988,18 @@ class MainWindow(QMainWindow):
         self.status_panel.message.setText("취소하는 중…")
 
     def _schedule_autosave(self) -> None:
-        if self.project_file is not None and self.project is not None:
+        if self.project_file is not None:
             self._autosave_timer.start()  # 재시작 = 디바운스
 
     def _flush_autosave(self) -> None:
         self._autosave_timer.stop()
-        if self.project_file is None or self.project is None:
+        if self.project_file is None:
+            return
+        project = self._capture_project()
+        if self.project is None and not (project.urls or project.title or project.source_channel or self.document_path or project.comment_filter):
             return
         try:
-            project_io.save(self.project, self.project_file)
+            project_io.save(project, self.project_file, recovery_document=self.document_path)
         except OSError:
             log.exception("작업 자동 저장 실패")
 

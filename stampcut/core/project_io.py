@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict
+from copy import deepcopy
+from dataclasses import asdict, replace
+from tempfile import NamedTemporaryFile
 from datetime import datetime
 from pathlib import Path
 
 from stampcut.core import settings as settings_mod
-from stampcut.core.models import CAPTION_STYLE_FIELDS, AudioMix, Clip, ClipStatus, Mention, Project, VideoInfo
+from stampcut.core.output_modes import STYLE_FIELDS
+from stampcut.core.models import Settings, CAPTION_STYLE_FIELDS, AudioMix, Clip, ClipStatus, Mention, Project, VideoInfo
 
 VERSION = 2
 SUPPORTED_VERSIONS = (1, 2)  # v1: audio 없음 → 기본값
@@ -60,8 +63,21 @@ def _clip_dict(c: Clip) -> dict:
     }
 
 
-def save(project: Project, path: Path) -> None:
-    data = {
+EDITOR_FIELDS = (*STYLE_FIELDS, "pre_seconds", "post_seconds", "cluster_window_seconds", "font_path",
+                 "output_mode", "style_mode", "mode_settings", "output_dir", "publish_draft")
+
+
+def editor_settings(settings: Settings) -> dict:
+    return {name: deepcopy(getattr(settings, name)) for name in EDITOR_FIELDS}
+
+
+def restore_settings(settings: Settings, values: dict) -> Settings:
+    return replace(settings, **{name: deepcopy(values[name]) for name in EDITOR_FIELDS
+                                if name in values and type(values[name]) is type(getattr(settings, name))})
+
+
+def document(project: Project) -> dict:
+    return {
         "version": VERSION,
         "urls": project.urls,
         "title": project.title,
@@ -74,11 +90,26 @@ def save(project: Project, path: Path) -> None:
         "source_start": project.source_start,
         "source_end": project.source_end,
         "comment_filter": project.comment_filter,
+        "editor_settings": project.editor_settings,
+        "rendered_path": project.rendered_path,
+        "rendered_signature": project.rendered_signature,
     }
+
+
+def save(project: Project, path: Path, *, recovery_document: Path | None = None) -> None:
+    data = document(project)
+    if recovery_document is not None:
+        data["recovery_document"] = str(recovery_document)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
-    os.replace(tmp, path)
+    tmp = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            tmp = Path(stream.name)
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def _load_clip(d: dict, by_id: dict[str, VideoInfo]) -> Clip | None:
@@ -138,6 +169,7 @@ def load(path: Path) -> Project | None:
             videos.append(VideoInfo(**v))
         by_id = {v.video_id: v for v in videos}
         clips = [c for raw in data["clips"] if (c := _load_clip(raw, by_id)) is not None]
+        rendered_path = str(data.get("rendered_path") or "")
         return Project(
             urls=list(data["urls"]), title=str(data["title"]), videos=videos, clips=clips,
             audio=_audio_from(data.get("audio")),
@@ -146,6 +178,10 @@ def load(path: Path) -> Project | None:
             source_channel=str(data.get("source_channel") or ""),
             source_start=str(data.get("source_start") or ""), source_end=str(data.get("source_end") or ""),
             comment_filter=str(data.get("comment_filter") or ""),
+            editor_settings=data["editor_settings"] if isinstance(data.get("editor_settings"), dict) else {},
+            rendered_path=rendered_path if Path(rendered_path).suffix.lower() == ".mp4" else "",
+            rendered_signature=str(data.get("rendered_signature") or ""),
+            recovery_document=str(data.get("recovery_document") or ""),
         )
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except (OSError, AttributeError, KeyError, TypeError, ValueError):
         return None

@@ -179,6 +179,12 @@ class Project:
     source_end: str = ""
     comment_filter: str = ""
 
+    editor_settings: dict = field(default_factory=dict)
+    rendered_path: str = ""
+    rendered_signature: str = ""
+    # Only the local recovery copy remembers which named document was open.
+    recovery_document: str = ""
+
     def enabled_clips(self) -> list[Clip]:
         return [c for c in self.clips if c.enabled]
 
