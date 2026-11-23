@@ -15,13 +15,14 @@ PUBLIC = "https://drive.google.com/uc?export=download&id=unique"
 MP4 = b"\x00\x00\x00\x18ftypisom" + b"a" * 48
 SHA = hashlib.sha256(MP4).hexdigest()
 META = {"id": "unique", "size": str(len(MP4)), "sha256Checksum": SHA,
-        "mimeType": "video/mp4", "webContentLink": PUBLIC}
+        "mimeType": "video/mp4", "webContentLink": PUBLIC, "parents": ["folder"]}
 PERM = {"id": "anyoneWithLink", "type": "anyone", "role": "reader", "allowFileDiscovery": False}
 
 
 @pytest.fixture
 def source(tmp_path, monkeypatch):
     monkeypatch.setattr(google_oauth, "drive_credentials", lambda *a, **kw: {"access_token": "secret", "permission_id": "account"}, raising=False)
+    monkeypatch.setattr("stampcut.core.publishing.drive._destination_folder", lambda *a: "folder", raising=False)
     path = tmp_path / "movie.mp4"
     path.write_bytes(MP4)
     return path
@@ -198,4 +199,45 @@ def test_browser_login_redirect_falls_back_to_verified_confirmation_form(source)
     import json
     create = next(c.request for c in responses.calls if c.request.method == "POST" and c.request.url.startswith(UPLOAD))
     assert json.loads(create.body)["name"] == "클립 · Instagram.mp4"
+    assert json.loads(create.body)["parents"] == ["folder"]
     assert not any(c.request.url.startswith("https://accounts.google.com/") for c in responses.calls)
+
+
+@responses.activate
+@pytest.mark.parametrize("existing", [False, True])
+def test_destination_folder_created_or_reused(existing):
+    import json
+    from contextlib import nullcontext
+    from unittest.mock import Mock
+    from urllib.parse import unquote_plus
+    from stampcut.core.publishing import drive
+
+    store = Mock()
+    store.operation.return_value = nullcontext()
+    responses.get(FILES, json={"files": [{"id": "folder"}] if existing else []})
+    responses.post(FILES, json={"id": "folder"})
+    assert drive._destination_folder(store, "secret", "account") == "folder"
+    query = unquote_plus(responses.calls[0].request.url)
+    assert "name = '문성FC영상'" in query and "'root' in parents" in query
+    posts = [c for c in responses.calls if c.request.method == "POST"]
+    if existing:
+        assert not posts
+    else:
+        body = json.loads(posts[0].request.body)
+        assert body["name"] == "문성FC영상" and body["mimeType"] == "application/vnd.google-apps.folder"
+
+
+@responses.activate
+def test_legacy_upload_moves_without_reupload(source):
+    from stampcut.core.publishing.drive import ensure_shared_video
+
+    state = {"drive_file_id": "unique", "drive_sha256": SHA}
+    responses.get(FILES + "/unique", json={**META, "parents": ["oldroot"]})
+    responses.patch(FILES + "/unique", json={"parents": ["folder"]})
+    responses.get(FILES + "/unique/permissions", json={"permissions": []})
+    responses.post(FILES + "/unique/permissions", json=PERM)
+    responses.get(PUBLIC, body=MP4, content_type="video/mp4")
+    assert ensure_shared_video(source, None, state, lambda s: None) == PUBLIC
+    moves = [c.request for c in responses.calls if c.request.method == "PATCH"]
+    assert len(moves) == 1 and "addParents=folder" in moves[0].url and "removeParents=oldroot" in moves[0].url
+    assert not any(c.request.method == "PUT" for c in responses.calls)

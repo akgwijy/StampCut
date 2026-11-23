@@ -14,7 +14,9 @@ from .models import PublishError, check_cancel, noop
 
 FILES = "https://www.googleapis.com/drive/v3/files"
 UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
-FIELDS = "id,size,sha256Checksum,mimeType,webContentLink,resourceKey,trashed"
+FIELDS = "id,size,sha256Checksum,mimeType,webContentLink,resourceKey,trashed,parents"
+FOLDER_NAME = "문성FC영상"
+FOLDER_TYPE = "application/vnd.google-apps.folder"
 CHUNK_SIZE = 8 * 1024 * 1024
 TIMEOUT = (10, 90)
 PUBLIC_ERROR = "Google Drive에서 로그인 없이 MP4 원본을 받을 수 없습니다. 외부 공유, 다운로드 제한과 다운로드 할당량을 확인하세요."
@@ -115,7 +117,47 @@ def _session_offset(response, size):
     return int(match[1]) + 1
 
 
-def _upload(video, display_name, size, token, state, save_state, progress, cancel):
+def _find_destination_folder(token):
+    params = {"q": f"name = '{FOLDER_NAME}' and mimeType = '{FOLDER_TYPE}' and 'root' in parents and trashed = false",
+              "spaces": "drive", "fields": "nextPageToken,files(id)", "orderBy": "createdTime", "pageSize": 100}
+    while True:
+        response = _call("GET", FILES, token=token, params=params)
+        _ok(response)
+        data = _json(response)
+        if data["files"]:
+            return _identifier(data["files"][0].get("id"))
+        if not data.get("nextPageToken"):
+            return None
+        params["pageToken"] = data["nextPageToken"]
+
+
+def _destination_folder(store, token, account):
+    folder = _find_destination_folder(token)
+    if folder:
+        return folder
+    with store.operation("drive-folder:" + account):
+        folder = _find_destination_folder(token)
+        if folder:
+            return folder
+        response = _call("POST", FILES, token=token, params={"fields": "id"},
+                         json={"name": FOLDER_NAME, "mimeType": FOLDER_TYPE, "parents": ["root"]})
+        _ok(response)
+        return _identifier(_json(response).get("id"))
+
+
+def _place_in_folder(file_url, parents, folder, token):
+    if folder in parents:
+        return
+    params = {"addParents": folder, "fields": "parents"}
+    if parents:
+        params["removeParents"] = ",".join(_identifier(parent) for parent in parents)
+    response = _call("PATCH", file_url, token=token, params=params, json={})
+    _ok(response)
+    if folder not in _json(response).get("parents", []):
+        raise PublishError(f"Google Drive의 {FOLDER_NAME} 폴더에 영상이 저장됐는지 확인하지 못했습니다.")
+
+
+def _upload(video, display_name, size, token, state, save_state, progress, cancel, folder):
     session = state.get("drive_session")
     offset = 0
     if session:
@@ -131,7 +173,7 @@ def _upload(video, display_name, size, token, state, save_state, progress, cance
             _ok(response)
     if not session:
         response = _call("POST", UPLOAD, token=token, params={"uploadType": "resumable", "fields": FIELDS},
-                         json={"id": state["drive_file_id"], "name": display_name or video.name, "mimeType": "video/mp4"},
+                         json={"id": state["drive_file_id"], "name": display_name or video.name, "mimeType": "video/mp4", "parents": [folder]},
                          headers={"X-Upload-Content-Length": str(size), "X-Upload-Content-Type": "video/mp4"})
         _ok(response)
         session = _url(response.headers.get("Location"), upload=True)
@@ -326,16 +368,18 @@ def ensure_shared_video(video: Path, store, state: dict, save_state, progress=no
         state.update(drive_file_id=_identifier(ids[0]), drive_sha256=sha, drive_account=account)
         save_state(state)
     file_url = FILES + "/" + _identifier(state["drive_file_id"])
+    folder = _destination_folder(store, token, account)
     if meta is None:
         check_cancel(cancel)
         progress("drive", 0, size, "Google Drive에 호환 MP4 업로드 중")
-        meta = _upload(video, display_name, size, token, state, save_state, progress, cancel)
+        meta = _upload(video, display_name, size, token, state, save_state, progress, cancel, folder)
     if (meta.get("id") != state["drive_file_id"] or meta.get("sha256Checksum") != sha
             or meta.get("size") != str(size) or meta.get("mimeType") != "video/mp4"):
         if not (state.get("drive_permission_id") or state.get("drive_share_pending")):
             _clear_transfer(state)
             save_state(state)
         raise PublishError("Google Drive 파일이 준비한 MP4와 일치하지 않습니다. 파일을 확인하고 다시 시도하세요.")
+    _place_in_folder(file_url, meta.get("parents", []), folder, token)
     state["drive_complete"] = True
     state.pop("drive_session", None)
     save_state(state)
