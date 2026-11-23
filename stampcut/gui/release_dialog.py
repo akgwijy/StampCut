@@ -1,5 +1,6 @@
 """Edit a reusable post and publish an explicitly selected completed video."""
 from __future__ import annotations
+from dataclasses import replace
 from pathlib import Path
 from PySide6.QtCore import Qt,QTimer,QUrl
 from PySide6.QtGui import QDesktopServices
@@ -96,10 +97,14 @@ class ReleaseDialog(JobDialog):
         self.progress=QProgressBar();self.progress.setRange(0,100)
         self.upload_btn=QPushButton("선택한 플랫폼에 업로드")
         self.upload_btn.clicked.connect(self._upload)
+        self.repost_btn = QPushButton("삭제한 Instagram 게시물 다시 올리기")
+        self.repost_btn.clicked.connect(self._repost_deleted)
+        self.repost_btn.hide()
+        self._instagram_post_id = None
         self.cancel_btn=QPushButton("작업 취소");self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel_job)
         self.close_btn=QPushButton("닫기");self.close_btn.clicked.connect(self.reject)
-        buttons=QHBoxLayout();buttons.addStretch();buttons.addWidget(self.upload_btn);buttons.addWidget(self.cancel_btn);buttons.addWidget(self.close_btn)
+        buttons=QHBoxLayout();buttons.addStretch();buttons.addWidget(self.repost_btn);buttons.addWidget(self.upload_btn);buttons.addWidget(self.cancel_btn);buttons.addWidget(self.close_btn)
         layout=QVBoxLayout(self)
         layout.addLayout(file_row);layout.addLayout(targets);layout.addWidget(self.account_summary);layout.addLayout(form)
         layout.addWidget(QLabel("글 내용 · 유튜브 설명 / 인스타그램 캡션"));layout.addWidget(self.body_edit,1);layout.addWidget(self.text_count);layout.addWidget(self.saved_label);layout.addWidget(hint)
@@ -149,6 +154,8 @@ class ReleaseDialog(JobDialog):
         self._changed()
 
     def _changed(self,*args):
+        self._instagram_post_id = None
+        self.repost_btn.hide()
         self._draft_timer.start();self._update_count()
         if not self.is_busy:
             self.upload_btn.setEnabled(True);self.upload_btn.setText("선택한 플랫폼에 업로드")
@@ -265,9 +272,23 @@ class ReleaseDialog(JobDialog):
         self.progress.setValue(100)
         self.message.setText("호환 파일 준비 완료. 릴스 호환 파일 칸의 파일을 공개 HTTPS 저장소에 올린 뒤 직접 주소를 입력하세요. 유튜브는 위의 원본 영상을 사용합니다.")
 
+    def _repost_deleted(self):
+        if self.is_busy or not self._instagram_post_id:
+            return
+        answer = QMessageBox.question(self, "Instagram 다시 올리기",
+                                      "Instagram에서 기존 게시물을 삭제했나요? 선택한 영상을 새 릴스로 게시합니다.",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            self._start_upload(self._instagram_post_id)
+
     def _upload(self):
+        self._start_upload()
+
+    def _start_upload(self, deleted_instagram_id=None):
         if self.is_busy or not self.flush_draft():return
         draft=self.draft()
+        if deleted_instagram_id:
+            draft = replace(draft, youtube=False, instagram=True)
         try:
             video=Path(draft.video_path)
             if not draft.video_path or not video.is_file():raise PublishError("업로드할 완성 영상을 선택하세요.")
@@ -280,7 +301,10 @@ class ReleaseDialog(JobDialog):
             self.message.setText(str(error));return
         self.result_table.setRowCount(0);self.message.setText("업로드 준비 중")
         self._last_upload_draft=draft
-        self.run_job(self.service.publish,video,draft,on_finished=self._show_results)
+        self.repost_btn.hide()
+        self._instagram_post_id = None
+        options = {"deleted_instagram_id": deleted_instagram_id} if deleted_instagram_id else {}
+        self.run_job(self.service.publish, video, draft, on_finished=self._show_results, **options)
 
     def set_job_busy(self,busy):
         for widget in (self.video_edit,self.browse_btn,self.prepare_btn,self.youtube_check,self.instagram_check,self.accounts_btn,self.title_edit,self.body_edit,self.privacy_combo,self.kids_check,self.instagram_url_edit,self.upload_btn):widget.setEnabled(not busy)
@@ -296,6 +320,9 @@ class ReleaseDialog(JobDialog):
         for row,outcome in enumerate(result.outcomes):
             text=statuses.get(outcome.status,outcome.status)
             if outcome.post and outcome.post.already_uploaded:text="이미 업로드됨"
+            if outcome.platform == "instagram" and outcome.status == "success" and outcome.post and not outcome.error:
+                self._instagram_post_id = outcome.post.id
+                self.repost_btn.show()
             if outcome.error:text+="\n"+outcome.error
             if outcome.status=="success":successes+=1
             for column,value in enumerate((names.get(outcome.platform,outcome.platform),text,outcome.post.url if outcome.post else "")):

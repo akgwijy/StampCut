@@ -193,3 +193,19 @@ def test_preview_profile_wraps_like_final(tmp_path, make_video, make_clip):
     preview_clip.preview_path = tmp_path / "preview.mp4"
     build_clip_command(paths(tmp_path), preview_clip, Settings(), "제목", probe(), pv, 3, tmp_path / "font.otf", profile=PREVIEW_PROFILE, source=preview_clip.preview_path)
     assert (pv / "clip_003_caption.txt").read_text("utf-8") == final_txt  # 배율과 무관하게 같은 자리에서 줄바꿈
+
+
+def test_title_font_with_missing_hangul_uses_bundled_face(tmp_path, make_video, make_clip):
+    import os
+    import pytest
+    from stampcut.core.settings import bundled_font_path
+
+    selected = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "YuGothL.ttc"
+    if not selected.is_file():
+        pytest.skip("Windows Yu Gothic regression fixture")
+    clip = make_clip(make_video(), t=20)
+    settings = Settings(title_font_path=str(selected))
+    for title, expected in [("2026 문성FC 골키퍼 황기훈", bundled_font_path()), ("2026 FC", selected)]:
+        cmd, _ = build(tmp_path, clip, settings, title=title)
+        title_filter = next(f for f in filter_complex(cmd).split(";") if f.endswith("[c1]"))
+        assert f"fontfile='{ff_path(expected)}'" in title_filter

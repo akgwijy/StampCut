@@ -310,3 +310,23 @@ def test_success_with_unrecorded_receipt_does_not_offer_drive_retry(qtbot, tmp_p
     outcome.error += "\nGoogle Drive 공유 해제 실패"
     widget._show_results(BatchResult([outcome]))
     assert not widget.upload_btn.isEnabled()
+
+
+def test_deleted_post_button_republishes_only_instagram(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    calls = []
+    class Service:
+        def publish(self, video, draft, progress, cancel, **kw):
+            calls.append((draft.youtube, draft.instagram, kw))
+            post = PublishedPost("instagram", "123", "https://www.instagram.com/reel/demo/", True)
+            return BatchResult([PublishOutcome("instagram", "success", post)])
+    widget, _ = create(qtbot, tmp_path, service=Service())
+    queue = []
+    monkeypatch.setattr(widget.pool, "start", queue.append)
+    widget.upload_btn.click()
+    queue.pop().run()
+    assert not widget.repost_btn.isHidden()
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+    widget.repost_btn.click()
+    queue.pop().run()
+    assert calls[-1] == (False, True, {"deleted_instagram_id": "123"})

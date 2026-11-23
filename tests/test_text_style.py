@@ -34,8 +34,8 @@ def test_independent_styles_save_and_legacy_font_fallback(tmp_path):
 ])
 def test_render_uses_independent_fonts_sizes_and_positions(tmp_path, make_video, make_clip, profile, title_size, caption_size, title_x, caption_x):
     title_font, caption_font = tmp_path / 'title.otf', tmp_path / 'caption.ttf'
-    title_font.write_bytes(b'font')
-    caption_font.write_bytes(b'font')
+    for face in (title_font, caption_font):
+        face.write_bytes(sm.bundled_font_path().read_bytes())
     settings = Settings(title_x=420, caption_x=620, title_font_size=88, caption_font_size=44,
                         title_font_path=str(title_font), caption_font_path=str(caption_font))
     clip = make_clip(make_video(), t=60, final_path=tmp_path / 'source.mp4')

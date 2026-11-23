@@ -102,8 +102,9 @@ def test_video_command_applies_clip_zoom_and_pan(tmp_path, make_video, make_clip
 def test_video_clip_overrides_survive_normalization_and_use_role_fonts(tmp_path, make_video, make_clip, profile, tx, ty, cx, cy, ts, cs, time_y):
     title_font = tmp_path / 'title.otf'
     caption_font = tmp_path / 'caption.otf'
-    title_font.write_bytes(b'font')
-    caption_font.write_bytes(b'font')
+    from stampcut.core.settings import bundled_font_path
+    for face in (title_font, caption_font):
+        face.write_bytes(bundled_font_path().read_bytes())
     settings = Settings(output_mode='video', title_font_size=88, title_font_path=str(title_font),
                         mode_settings={'video': {'title_x': 1800, 'title_y': 200, 'caption_x': 1000, 'caption_y': 980}})
     clip = make_clip(make_video(), t=60, caption_x=1700, caption_y=900, caption_font_size=44,

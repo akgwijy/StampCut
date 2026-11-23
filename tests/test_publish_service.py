@@ -333,3 +333,20 @@ def test_overlapping_identical_release_is_claimed_once(tmp_path):
             assert len(calls)==1 and second.outcomes[0].status=="error"
         finally:release.set()
         assert first.result(timeout=4).outcomes[0].status=="success"
+
+
+def test_only_confirmed_deleted_instagram_post_can_be_republished(tmp_path):
+    seen = []
+    def provider(video, draft, store, state, save, **kwargs):
+        assert not state.get("publish_attempted") and not state.get("container_id")
+        seen.append(1)
+        state.update(container_id="old", publish_attempted=True)
+        return PublishedPost("instagram", str(len(seen)), "https://www.instagram.com/reel/demo/")
+    service, video, store = setup(tmp_path, {"instagram": provider})
+    draft = ReleaseDraft(youtube=False)
+    old = service.publish(video, draft).outcomes[0].post
+    new = service.publish(video, draft, deleted_instagram_id=old.id).outcomes[0].post
+    assert new.id != old.id and not new.already_uploaded
+    service.publish(video, draft, deleted_instagram_id=old.id)
+    assert service.publish(video, draft).outcomes[0].post.already_uploaded
+    assert len(seen) == 2

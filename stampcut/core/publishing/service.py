@@ -88,13 +88,15 @@ class ReleaseService:
         from .instagram import publish_instagram
         return publish_instagram
 
-    def publish(self, video: Path, draft: ReleaseDraft, progress=noop, cancel=None) -> BatchResult:
+    def publish(self, video: Path, draft: ReleaseDraft, progress=noop, cancel=None, *, deleted_instagram_id=None) -> BatchResult:
         video = Path(video)
         if not video.is_file() or video.suffix.lower() not in (".mp4", ".mov") or video.stat().st_size == 0:
             raise PublishError("완성된 MP4/MOV 영상 파일을 선택하세요.")
         targets = [p for p, selected in (("youtube", draft.youtube), ("instagram", draft.instagram)) if selected]
         if not targets:
             raise PublishError("업로드할 플랫폼을 하나 이상 선택하세요.")
+        if deleted_instagram_id and targets != ["instagram"]:
+            raise PublishError("삭제한 게시물 다시 올리기는 Instagram만 선택하세요.")
         accounts = {}
         for platform in targets:
             draft.validate_for(platform)
@@ -151,6 +153,15 @@ class ReleaseService:
                         if platform == "instagram":
                             cleanup.callback(_close_drive_share, self.store, state, save_state, result)
                         post = _confirmed(platform, state)
+                        if deleted_instagram_id:
+                            if not post or post.id != deleted_instagram_id:
+                                raise PublishError("선택한 Instagram 게시 기록이 변경되었습니다. 업로드 결과를 다시 확인하세요.")
+                            # Keep the Drive file and any outstanding sharing cleanup.
+                            transfer = {field: value for field, value in state.items() if field.startswith("drive_")}
+                            self.store.put(key, transfer)
+                            state.clear()
+                            state.update(transfer)
+                            post = None
                         if post:
                             post.already_uploaded = True
                             result.outcomes.append(PublishOutcome(platform, "success", post))

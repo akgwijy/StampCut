@@ -5,7 +5,10 @@ import json
 import os
 import sys
 from dataclasses import asdict, fields
+from functools import lru_cache
 from pathlib import Path
+
+from fontTools.ttLib import TTFont, TTLibError
 
 from stampcut.core.models import Settings
 from stampcut.core.output_modes import normalize_output_settings
@@ -57,6 +60,30 @@ def resolve_font(s: Settings, role: str | None = None, fallback: Path | None = N
     if fallback is not None:
         return fallback
     return Path(s.font_path) if s.font_path else bundled_font_path()
+
+
+@lru_cache(maxsize=32)
+def _font_characters(path: Path, modified: int) -> frozenset[int]:
+    # FFmpeg selects the first face in a TTC when given only a font file.
+    with TTFont(path, fontNumber=0, lazy=True) as font:
+        return frozenset(font.getBestCmap() or ())
+
+
+def text_font(path: Path, text: str) -> Path:
+    bundled = bundled_font_path()
+    if not text.strip() or path == bundled:
+        return path
+    required = {ord(char) for char in text if not char.isspace()}
+    try:
+        available = _font_characters(path, path.stat().st_mtime_ns)
+    except (OSError, TTLibError):
+        return bundled
+    missing = required - available
+    if missing:
+        fallback = _font_characters(bundled, bundled.stat().st_mtime_ns)
+        if missing & fallback and (required & available) <= fallback:
+            return bundled
+    return path
 
 
 def resolve_output_dir(s: Settings) -> Path:

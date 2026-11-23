@@ -62,7 +62,8 @@ def test_legacy_projects_inherit_common_caption_style(tmp_path, make_video, make
 @pytest.mark.parametrize("profile", [FINAL_PROFILE, PREVIEW_PROFILE])
 def test_renderer_uses_selected_clip_style_without_leaking_to_next(tmp_path, make_video, make_clip, profile):
     font = tmp_path / "clip.otf"
-    font.write_bytes(b"font")
+    from stampcut.core.settings import bundled_font_path
+    font.write_bytes(bundled_font_path().read_bytes())
     settings = Settings()
     video = make_video()
     clips = [make_clip(video, 60, caption_x=400, caption_y=1200, caption_font_size=80,

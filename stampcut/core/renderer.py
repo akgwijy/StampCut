@@ -9,7 +9,7 @@ from stampcut.core.ffmpeg import FfmpegPaths, ProbeInfo
 from stampcut.core.layouts import layout_for
 from stampcut.core.models import AudioMix, Clip, Settings
 from stampcut.core.output_modes import normalize_output_settings
-from stampcut.core.settings import resolve_font
+from stampcut.core.settings import resolve_font, text_font
 from stampcut.core.textwrap_kr import wrap
 from stampcut.core.timestamps import format_time
 
@@ -168,8 +168,8 @@ def build_clip_command(
     title_size = int(_clamp(settings.title_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX))
     caption_size = int(_clamp(settings.caption_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX))
     title_font, time_font, caption_font = round(title_size * k), round(L["time_font"] * k), round(caption_size * k)
-    title_face = resolve_font(settings, "title", font_path)
-    caption_face = resolve_font(settings, "caption", font_path)
+    title_face = text_font(resolve_font(settings, "title", font_path), title)
+    caption_face = text_font(resolve_font(settings, "caption", font_path), clip.caption)
     title_x = round(_clamp(settings.title_x, 0, L["canvas_w"]) * k)
     caption_x = round(_clamp(settings.caption_x, 0, L["canvas_w"]) * k)
     if settings.output_mode == "video":

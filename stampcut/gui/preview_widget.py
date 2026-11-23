@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from stampcut.core.bgm_sync import bgm_position
 from stampcut.core.models import CAPTION_STYLE_FIELDS, AudioMix, Clip, Settings
-from stampcut.core.settings import resolve_font
+from stampcut.core.settings import resolve_font, text_font
 from stampcut.core.layouts import layout_for
 from stampcut.core.output_modes import normalize_output_settings
 from stampcut.gui.font_picker import FontPicker
@@ -634,9 +634,10 @@ class PreviewWidget(QWidget):
         s = clip.caption_settings(self.settings) if clip is not None else self.settings
         title_size = min(max(s.title_font_size, FONT_SIZE_MIN), FONT_SIZE_MAX)
         caption_size = min(max(s.caption_font_size, FONT_SIZE_MIN), FONT_SIZE_MAX)
-        self._apply_text_font(self.title_item, resolve_font(s, "title"), title_size)
-        self._apply_text_font(self.caption_item, resolve_font(s, "caption"), caption_size)
-        self._apply_text_font(self.time_item, resolve_font(s, "caption"), L["time_font"])
+        self._apply_text_font(self.title_item, text_font(resolve_font(s, "title"), self.title), title_size)
+        caption_face = text_font(resolve_font(s, "caption"), clip.caption if clip else "")
+        self._apply_text_font(self.caption_item, caption_face, caption_size)
+        self._apply_text_font(self.time_item, caption_face, L["time_font"])
         title_x = min(max(s.title_x, 0), L["canvas_w"])
         caption_x = min(max(s.caption_x, 0), L["canvas_w"])
         title_y = min(max(s.title_y, 0), L["canvas_h"])
