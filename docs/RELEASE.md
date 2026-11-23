@@ -20,7 +20,7 @@ StampCut에서 완성 영상을 YouTube Shorts와 Instagram Reels에 게시하�
 
 1. YouTube 연결에 사용한 Google Cloud 프로젝트에서 **Google Drive API**를 사용 설정합니다. 데스크톱 OAuth 클라이언트는 함께 사용할 수 있습니다. [Drive API 사용 설정](https://console.cloud.google.com/apis/library/drive.googleapis.com)
 2. **릴리즈 → 계정 연결 / 설정…**에서 Google Drive를 연결하고 브라우저에서 계정을 선택합니다. StampCut은 앱이 만든 파일을 관리하는 `drive.file` 권한을 요청합니다. [Drive 권한 안내](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
-3. 게시할 영상을 선택하고 **Instagram Reels → Google Drive 자동 업로드**를 선택합니다. 앱이 원본과 같은 해상도·화면 비율의 릴스용 MP4를 **내 드라이브 → 문성FC영상** 폴더에 업로드합니다. 폴더가 없으면 첫 업로드 때 생성합니다. 파일을 따로 올리거나 URL을 복사할 필요가 없습니다.
+3. 게시할 영상을 선택하고 **Instagram Reels → Google Drive 자동 업로드**를 선택합니다. 앱이 선택한 MP4 파일을 그대로 **내 드라이브 → 문성FC영상** 폴더에 업로드합니다. 폴더가 없으면 첫 업로드 때 생성합니다. 파일을 따로 올리거나 URL을 복사할 필요가 없습니다.
 4. Meta가 영상을 가져올 동안 해당 파일에만 **링크가 있는 모든 사용자 · 뷰어** 권한이 적용됩니다. 작업이 끝나거나 취소되면 앱이 만든 공유 권한을 회수하고 Drive 파일은 보관합니다. 공유 해제 실패가 표시되면 같은 릴리즈에서 다시 시도하거나 Drive에서 해당 파일의 공유를 **제한됨**으로 변경하세요.
 
 조직 정책이 외부 링크 공유를 제한하거나 Google이 다운로드 확인 화면만 제공하면 앱이 이를 알리고 게시를 중단합니다.

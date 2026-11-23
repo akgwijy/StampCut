@@ -198,7 +198,7 @@ def _upload(video, display_name, size, token, state, save_state, progress, cance
             if not offset < confirmed <= end:
                 raise PublishError("Google Drive 전송 위치를 확인할 수 없습니다. 다시 시도하세요.")
             offset = confirmed
-            progress("drive", offset, size, "Google Drive에 호환 MP4 업로드 중")
+            progress("drive", offset, size, "Google Drive에 MP4 업로드 중")
     raise PublishError("Google Drive가 업로드 완료를 확인하지 않았습니다. 다시 시도하세요.")
 
 
@@ -335,11 +335,13 @@ def _clear_transfer(state):
         state.pop(field, None)
 
 
-def ensure_shared_video(video: Path, store, state: dict, save_state, progress=noop, cancel=None, *, display_name: str | None = None) -> str:
+def ensure_shared_video(video: Path, store, state: dict, save_state, progress=noop, cancel=None, *, display_name: str | None = None, expected_sha256: str | None = None) -> str:
     """Return an anonymously verified URL for these exact prepared bytes."""
     check_cancel(cancel)
     video = Path(video)
     size, sha, prefix = _local_file(video, cancel)
+    if expected_sha256 is not None and sha != expected_sha256:
+        raise PublishError("선택한 MP4가 변경되었습니다. 파일을 다시 선택하세요.")
     credentials = google_oauth.drive_credentials(store, progress=progress, cancel=cancel)
     token = credentials["access_token"]
     account = credentials["permission_id"]
@@ -371,7 +373,7 @@ def ensure_shared_video(video: Path, store, state: dict, save_state, progress=no
     folder = _destination_folder(store, token, account)
     if meta is None:
         check_cancel(cancel)
-        progress("drive", 0, size, "Google Drive에 호환 MP4 업로드 중")
+        progress("drive", 0, size, "Google Drive에 MP4 업로드 중")
         meta = _upload(video, display_name, size, token, state, save_state, progress, cancel, folder)
     if (meta.get("id") != state["drive_file_id"] or meta.get("sha256Checksum") != sha
             or meta.get("size") != str(size) or meta.get("mimeType") != "video/mp4"):

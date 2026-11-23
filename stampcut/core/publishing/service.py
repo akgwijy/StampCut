@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from stampcut.core.ffmpeg import Cancelled
 from .credentials import CredentialStore
-from .media import inspect_video, prepare_instagram, validate_media
+from .media import INSTAGRAM_MAX_BYTES, inspect_video, prepare_instagram, validate_media
 from .models import ReleaseDraft, PublishedPost, PublishError, PublishUncertain, check_cancel, noop
 
 
@@ -120,6 +120,9 @@ class ReleaseService:
             instagram_file = Path(draft.instagram_prepared_path) if url_mode and draft.instagram_prepared_path else video
             if url_mode and not instagram_file.is_file():
                 raise PublishError("인스타그램 호환 파일이 없습니다. 릴스 호환 파일 준비를 다시 누르세요.")
+            original_mp4 = video.suffix.lower() == ".mp4" and not url_mode
+            if "instagram" in targets and original_mp4 and info.size > INSTAGRAM_MAX_BYTES:
+                raise PublishError("선택한 MP4가 Instagram의 300MB 업로드 한도를 넘습니다.")
             for platform in targets:
                 target_info = self.inspector(instagram_file, self.paths) if platform == "instagram" and instagram_file != video else info
                 if platform == "instagram" and url_mode and not target_info.same_geometry(info):
@@ -171,21 +174,32 @@ class ReleaseService:
                             publish_draft = draft
                             upload = instagram_file if platform == "instagram" and url_mode else video
                             if platform == "instagram" and drive_mode:
+                                if (original_mp4 and state.get("container_id") and not _ambiguous(state)
+                                        and state.get("drive_sha256") != fingerprint):
+                                    # A previous version may have staged a converted file with Meta.
+                                    for field in ("container_id", "upload_uri", "uploaded", "video_url", "rejected_transfer", "status"):
+                                        state.pop(field, None)
+                                    save_state(state)
                                 ready = state.get("status") == "ready" and state.get("container_id") and state.get("video_url")
                                 if ready or _ambiguous(state):
                                     # Instagram checks this container again before publishing.
                                     publish_draft = replace(draft, instagram_video_url=state.get("video_url", ""))
                                 else:
                                     from .drive import ensure_shared_video
-                                    upload = self.preparer(video, self.paths, fingerprint, progress=target_progress, cancel=cancel)
+                                    if not original_mp4:
+                                        upload = self.preparer(video, self.paths, fingerprint, progress=target_progress, cancel=cancel)
                                     link = ensure_shared_video(upload, self.store, state, save_state,
                                                                progress=target_progress, cancel=cancel,
-                                                               display_name=f"{video.stem} · Instagram.mp4")
+                                                               display_name=video.name if original_mp4 else f"{video.stem} · Instagram.mp4",
+                                                               expected_sha256=fingerprint if original_mp4 else None)
                                     publish_draft = replace(draft, instagram_video_url=link)
                             elif platform == "instagram" and not url_mode:
-                                upload = self.preparer(video, self.paths, fingerprint, progress=target_progress, cancel=cancel)
+                                if not original_mp4:
+                                    upload = self.preparer(video, self.paths, fingerprint, progress=target_progress, cancel=cancel)
                                 if not _ambiguous(state):
                                     upload_fingerprint = file_fingerprint(upload, cancel)
+                                    if original_mp4 and upload_fingerprint != fingerprint:
+                                        raise PublishError("선택한 MP4가 변경되었습니다. 파일을 다시 선택하세요.")
                                     if state.get("container_id") and state.get("upload_fingerprint") != upload_fingerprint:
                                         for field in ("container_id", "upload_uri", "uploaded", "video_url"):
                                             state.pop(field, None)

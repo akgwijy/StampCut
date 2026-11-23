@@ -17,7 +17,7 @@ def setup(tmp_path,providers,**kwargs):
 
 
 @pytest.mark.parametrize("first_fails", [False, True])
-def test_drive_hosts_prepared_file_and_revokes_link_even_on_failure(tmp_path, monkeypatch, first_fails):
+def test_drive_hosts_selected_mp4_and_revokes_link_even_on_failure(tmp_path, monkeypatch, first_fails):
     from stampcut.core.publishing import drive
     events = []
     link = "https://drive.google.com/uc?id=demo"
@@ -43,7 +43,7 @@ def test_drive_hosts_prepared_file_and_revokes_link_even_on_failure(tmp_path, mo
     service.preparer = lambda *args, **kwargs: prepared
     draft = ReleaseDraft(youtube=False, instagram_use_drive=True)
     result = service.publish(video, draft)
-    assert events == [("share", prepared), ("instagram", link), ("revoke", "reader")]
+    assert events == [("share", video), ("instagram", link), ("revoke", "reader")]
     assert result.outcomes[0].status == ("error" if first_fails else "success")
     assert not draft.instagram_video_url
     if not first_fails:
@@ -55,7 +55,8 @@ def test_ready_drive_container_resumes_without_resharing(tmp_path, monkeypatch):
     from stampcut.core.publishing import drive
     shares = []
     link = "https://drive.google.com/uc?id=demo"
-    def share(*args, **kwargs):
+    def share(path, store, state, save_state, **kwargs):
+        state["drive_sha256"] = kwargs["expected_sha256"]
         shares.append(1)
         return link
     def provider(upload, draft, store, state, save_state, **kwargs):
@@ -148,6 +149,7 @@ def test_instagram_retry_reconciles_prepared_file_without_repeating_youtube(tmp_
         return PublishedPost("instagram", "300", "https://www.instagram.com/reel/test/")
 
     service, video, _ = setup(tmp_path, {"youtube": youtube, "instagram": instagram})
+    video = video.rename(video.with_suffix(".mov"))
     old = tmp_path / "old.mp4"
     old.write_bytes(b"old")
     new = tmp_path / "new.mp4"
@@ -350,3 +352,41 @@ def test_only_confirmed_deleted_instagram_post_can_be_republished(tmp_path):
     service.publish(video, draft, deleted_instagram_id=old.id)
     assert service.publish(video, draft).outcomes[0].post.already_uploaded
     assert len(seen) == 2
+
+
+def test_direct_upload_sends_selected_mp4_after_deleted_post(tmp_path):
+    calls = []
+    def provider(path, draft, store, state, save_state, **kwargs):
+        calls.append((path, path.read_bytes()))
+        return PublishedPost("instagram", str(len(calls)), "https://www.instagram.com/reel/demo/")
+    service, video, _ = setup(tmp_path, {"instagram": provider})
+    service.preparer = lambda *a, **kw: pytest.fail("selected MP4 must not be converted")
+    draft = ReleaseDraft(youtube=False)
+    first = service.publish(video, draft).outcomes[0].post
+    assert service.publish(video, draft).outcomes[0].post.already_uploaded
+    second = service.publish(video, draft, deleted_instagram_id=first.id).outcomes[0].post
+    assert second.id != first.id
+    assert calls == [(video, b"video-content")] * 2
+
+
+def test_ready_legacy_drive_conversion_is_replaced_before_publish(tmp_path, monkeypatch):
+    from stampcut.core.publishing import drive
+    def share(path, store, state, save, **kwargs):
+        assert path == video
+        return "https://drive.google.com/uc?id=new"
+    states = []
+    def provider(path, draft, store, state, save, **kwargs):
+        states.append(dict(state))
+        if len(states) == 1:
+            state.update(status="ready", container_id="200", uploaded=True,
+                         drive_sha256="old-converted-hash", video_url="https://drive.google.com/uc?id=old")
+            save(state)
+            raise Cancelled()
+        assert not state.get("container_id") and draft.instagram_video_url.endswith("=new")
+        return PublishedPost("instagram", "201", "https://www.instagram.com/reel/demo/")
+    monkeypatch.setattr(drive, "ensure_shared_video", share)
+    service, video, store = setup(tmp_path, {"instagram": provider})
+    store.put("drive", {"refresh_token": "test"})
+    draft = ReleaseDraft(youtube=False, instagram_use_drive=True)
+    assert service.publish(video, draft).cancelled
+    assert service.publish(video, draft).outcomes[0].status == "success"

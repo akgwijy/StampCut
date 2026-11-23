@@ -111,7 +111,7 @@ def validate_media(info:MediaInfo,platform:str,method="resumable"):
             if info.size>INSTAGRAM_MAX_BYTES or info.width>1920 or not 23<=info.fps<=60 or info.video_codec not in ("h264","hevc"):
                 raise PublishError("공개 URL 영상은 릴스 규격(H264/HEVC, 23~60fps, 가로 1920px 이하, 300MB 이하)에 맞아야 합니다.")
             if info.has_audio and (info.audio_codec!="aac" or info.audio_bitrate>128000*1.05):
-                raise PublishError("공개 URL 영상의 오디오는 AAC 128kbps 이하로 준비하세요. 파일 직접 전송 방식은 앱에서 변환합니다.")
+                raise PublishError("공개 URL 영상의 오디오는 AAC 128kbps 이하로 준비하세요. 릴스 호환 파일 준비를 사용하세요.")
 
 
 def _compatible_instagram(info,source):

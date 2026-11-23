@@ -82,7 +82,7 @@ class ReleaseDialog(JobDialog):
         form.addRow(self.drive_help)
         form.addRow(self.prepared_label, self.prepared_edit)
         form.addRow(self.instagram_url_label, self.instagram_url_edit)
-        hint=QLabel("YouTube Shorts: 세로/정사각형 · 3분 이내. Instagram 파일 직접 전송은 호환 영상으로 준비합니다.")
+        hint=QLabel("YouTube Shorts: 세로/정사각형 · 3분 이내. Instagram에 올릴 완성 MP4를 선택하세요. 선택한 MP4를 그대로 전송합니다.")
         hint.setWordWrap(True)
         self.result_table=QTableWidget(0,3)
         self.result_table.setHorizontalHeaderLabels(["플랫폼","상태","게시 링크 · 더블클릭으로 열기"])
@@ -213,7 +213,7 @@ class ReleaseDialog(JobDialog):
         self.drive_check.setEnabled(not self.is_busy and (self._drive_connected or use_drive))
         self.drive_help.setVisible(show_instagram and (use_drive or not self._drive_connected))
         if use_drive:
-            text = "릴스용 파일을 Drive에 올리고 ‘링크가 있는 모든 사용자’에게 임시로 보기 권한을 부여합니다. Instagram 처리가 끝나면 이 권한을 해제합니다."
+            text = "선택한 영상 파일을 Drive에 올리고 ‘링크가 있는 모든 사용자’에게 임시로 보기 권한을 부여합니다. Instagram 처리가 끝나면 이 권한을 해제합니다."
             if not self._drive_connected:
                 text = "계정 연결 / 설정에서 Google Drive를 다시 연결하세요. " + text
         else:
